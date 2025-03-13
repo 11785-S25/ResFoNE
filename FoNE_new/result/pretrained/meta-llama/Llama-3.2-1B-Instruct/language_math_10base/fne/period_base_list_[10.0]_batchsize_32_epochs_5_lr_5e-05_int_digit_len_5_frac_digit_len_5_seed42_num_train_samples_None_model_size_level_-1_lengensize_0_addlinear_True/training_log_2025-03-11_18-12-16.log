@@ -1,0 +1,17 @@
+2025-03-11 18:12:16 - INFO - result/pretrained/meta-llama/Llama-3.2-1B-Instruct/language_math_10base/fne/period_base_list_[10.0]_batchsize_32_epochs_5_lr_5e-05_int_digit_len_5_frac_digit_len_5_seed42_num_train_samples_None_model_size_level_-1_lengensize_0_addlinear_True
+2025-03-11 18:12:16 - INFO - Namespace(batch_size=32, epochs=5, int_digit_len=5, frac_digit_len=5, len_gen_size=0, lr=5e-05, name='', model='meta-llama/Llama-3.2-1B-Instruct', dataset='Onlydrinkwater/language_math_10base', train_from_scratch=False, use_digit_wise_tokenizer=False, num_train_samples=None, num_test_samples=None, seed=42, model_size_level=-1, method='fne', scheduler_name='cosine', period_base_list=[10.0], clip=False, not_add_linear=False, add_linear=True)
+2025-03-11 18:12:16 - INFO - Dataset specified as single name: Onlydrinkwater/language_math_10base
+2025-03-11 18:14:22 - INFO - Pre-trained model loaded!
+2025-03-11 18:14:24 - INFO - Standard tokenizer loaded.
+2025-03-11 18:14:24 - INFO - Expanding model config from 128256 to 128258 to match tokenizer.
+2025-03-11 18:14:30 - INFO - Actual model size (total parameters): 1235.82M
+2025-03-11 18:14:30 - INFO - Padding token ID: 128256
+2025-03-11 18:14:30 - INFO - [NUM] token ID: 128257
+2025-03-11 18:14:31 - INFO - Train dataset length: 27352, Test dataset length: 3420
+2025-03-11 18:14:33 - INFO - 2 data example: [{'input_ids': tensor([128000,   7749,    315,    256, 128257,    220,    323,    256, 128257,
+           220]), 'numbers': [177.0, 219.0], 'label': 396.0}, {'input_ids': tensor([128000,  48966,    256, 128257,    220,    489,    256, 128257,    220]), 'numbers': [71.0, 93.0], 'label': 164.0}]
+2025-03-11 18:14:33 - INFO - period_list: [0.0001, 0.001, 0.01, 0.1, 1.0, 10.0, 100.0, 1000.0, 10000.0, 100000.0]
+2025-03-11 18:14:33 - INFO - self.powers_of_ten: tensor([         1,         10,        100,       1000,      10000,     100000,
+           1000000,   10000000,  100000000, 1000000000])
+2025-03-11 18:14:33 - INFO - ----------------------------------------------------------------------------------------------------
+2025-03-11 18:14:33 - INFO - Starting Epoch 1/5
