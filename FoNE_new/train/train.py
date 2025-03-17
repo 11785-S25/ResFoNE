@@ -22,6 +22,11 @@ def train_fne(model, train_loader, fne, optimizer, scheduler, args, int_digit_le
         fourier_embeddings = fne(scatter_tensor, len_gen=len_gen)
         input_embeddings = regular_embeddings + fourier_embeddings
 
+        # modified part by EJ: match dtype of inputs same as model dtype
+        input_embeddings = input_embeddings.to(model.dtype)
+        attention_mask = attention_mask.to(model.dtype)
+
+
         outputs = model(inputs_embeds=input_embeddings, attention_mask=attention_mask, output_hidden_states=True)
         before_decoder = outputs.hidden_states[-1]
         last_token_hidden_state = (before_decoder * last_token_mask.unsqueeze(-1)).sum(dim=1)

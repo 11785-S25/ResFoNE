@@ -113,6 +113,14 @@ class FNE(nn.Module):
         result = torch.zeros((len(numbers), self.embedding_dim), dtype=torch.float32, device=self.device)
         result[:, :cos_sin_interleaved.shape[1]] = cos_sin_interleaved
 
+        # result_list = result.tolist()
+
+        # with open('result_fne.txt', 'w') as file:
+        #     for item in result_list:
+        #         file.write(f"{item}\n")
+        
+        # print(f"result: {result}, shape: {result.shape}")
+        
         return result
 
     def _create_precomputed_cos_sin_matrix(self, period_base_list=[2, 5]):
