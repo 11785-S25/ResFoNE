@@ -1,0 +1,16 @@
+2025-03-16 23:41:02 - INFO - result/test_run/train_from_scratch/gpt2/5_digits_sub/fne/period_base_list_[10.0]_batchsize_32_epochs_5_lr_5e-05_int_digit_len_10_frac_digit_len_0_seed42_num_train_samples_10000_model_size_level_-1_lengensize_0_addlinear_True
+2025-03-16 23:41:02 - INFO - Namespace(batch_size=32, epochs=5, int_digit_len=10, frac_digit_len=0, len_gen_size=0, lr=5e-05, name='test_run', model='gpt2', dataset='5_digits_sub', train_from_scratch=True, use_digit_wise_tokenizer=False, num_train_samples=10000, num_test_samples=None, seed=42, model_size_level=-1, method='fne', scheduler_name='cosine', period_base_list=[10.0], clip=True, not_add_linear=False, add_linear=True)
+2025-03-16 23:41:02 - INFO - Dataset specified as single name: 5_digits_sub
+2025-03-16 23:41:06 - INFO - Model initialized from scratch with default configuration.
+2025-03-16 23:41:06 - INFO - Standard tokenizer loaded.
+2025-03-16 23:41:06 - INFO - Expanding model config from 50257 to 50259 to match tokenizer.
+2025-03-16 23:41:12 - INFO - Actual model size (total parameters): 124.44M
+2025-03-16 23:41:12 - INFO - Padding token ID: 50257
+2025-03-16 23:41:12 - INFO - [NUM] token ID: 50258
+2025-03-16 23:41:13 - INFO - Train dataset length: 720000, Test dataset length: 200000
+2025-03-16 23:41:39 - INFO - 2 data example: [{'input_ids': tensor([  220, 50258,   532,   220, 50258,   796]), 'numbers': [50841.0, 33557.0], 'label': 17284.0}, {'input_ids': tensor([  220, 50258,   532,   220, 50258,   796]), 'numbers': [84663.0, 18020.0], 'label': 66643.0}]
+2025-03-16 23:41:39 - INFO - period_list: [10.0, 100.0, 1000.0, 10000.0, 100000.0, 1000000.0, 10000000.0, 100000000.0, 1000000000.0, 10000000000.0]
+2025-03-16 23:41:39 - INFO - self.powers_of_ten: tensor([         1,         10,        100,       1000,      10000,     100000,
+           1000000,   10000000,  100000000, 1000000000])
+2025-03-16 23:41:39 - INFO - ----------------------------------------------------------------------------------------------------
+2025-03-16 23:41:39 - INFO - Starting Epoch 1/5

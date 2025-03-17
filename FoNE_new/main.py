@@ -12,8 +12,8 @@ from train.train_pipeline import (
 )
 
 # Set environment variables for Hugging Face and WandB tokens
-os.environ["HF_TOKEN"] = "<your_hf_key>"
-os.environ["WANDB_API_KEY"] = "<your_wandb_key>"
+os.environ["HF_TOKEN"] = ""
+os.environ["WANDB_API_KEY"] = ""
 wandb.login()
 
 def main():
@@ -22,24 +22,24 @@ def main():
     )
     parser.add_argument('--batch_size', type=int, default=32, help='Batch size for training and testing')
     parser.add_argument('--epochs', type=int, default=5, help='Number of epochs for training')
-    parser.add_argument('--int_digit_len', type=int, default=5, help='Number of digits for integer part')
-    parser.add_argument('--frac_digit_len', type=int, default=5, help='Number of digits for fractional part')
+    parser.add_argument('--int_digit_len', type=int, default=10, help='Number of digits for integer part')
+    parser.add_argument('--frac_digit_len', type=int, default=0, help='Number of digits for fractional part')
     parser.add_argument('--len_gen_size', type=int, default=0, help='FNE: add k 0s after numbers to len gen')
     parser.add_argument('--lr', type=float, default=5e-5, help='Learning rate')
-    parser.add_argument('--name', type=str, default='', help='Log name')
-    parser.add_argument('--model', type=str, default='meta-llama/Llama-3.2-1B-Instruct', help='Model name')
-    parser.add_argument('--dataset', type=str, default='Onlydrinkwater/language_math_10base', help='Dataset name')
-    parser.add_argument('--train_from_scratch', action='store_true', help='Train the model from scratch without pre-trained weights')
-    parser.add_argument('--use_digit_wise_tokenizer', action='store_true', help='Whether to use digit-wise tokenizer')
-    parser.add_argument('--num_train_samples', type=int, default=None, help='Number of training samples to use')
+    parser.add_argument('--name', type=str, default='test_run', help='Log name')
+    parser.add_argument('--model', type=str, default='gpt2', help='Model name')
+    parser.add_argument('--dataset', type=str, default='6_digits_add', help='Dataset name')
+    parser.add_argument('--train_from_scratch', default=True, action='store_true', help='Train the model from scratch without pre-trained weights')
+    parser.add_argument('--use_digit_wise_tokenizer', default=False, action='store_true', help='Whether to use digit-wise tokenizer')
+    parser.add_argument('--num_train_samples', type=int, default=100000, help='Number of training samples to use')
     parser.add_argument('--num_test_samples', type=int, default=None, help='Number of test samples to use')
     parser.add_argument('--seed', type=int, default=42, help='Random seed for reproducibility')
     parser.add_argument('--model_size_level', type=int, default=-1, help='From 1 to 8, choose the model size for training from scratch')
     parser.add_argument('--method', type=str, choices=['regular', 'fne', 'xval', 'vanilla'], default='fne', help='Training method: regular, fne, xval, or vanilla')
     parser.add_argument('--scheduler_name', type=str, default='cosine', help='Name of the learning rate scheduler (e.g., linear, constant, cosine, etc.)')
-    parser.add_argument('--period_base_list', type=str, nargs='+', default=['10'], help='List of period bases for Fourier embedding (e.g., 2, 5, 1/3)')
-    parser.add_argument('--clip', action='store_true', help='Enable clipping')
-    parser.add_argument('--not_add_linear', action='store_true', help='Do not add linear layer after FNE')
+    parser.add_argument('--period_base_list', type=str, nargs='+', default=[10.0], help='List of period bases for Fourier embedding (e.g., 2, 5, 1/3)')
+    parser.add_argument('--clip', default=True, action='store_true', help='Enable clipping')
+    parser.add_argument('--not_add_linear', default=False, action='store_true', help='Do not add linear layer after FNE')
     
     args = parser.parse_args()
     
@@ -74,7 +74,7 @@ def main():
     # Load model and tokenizer
     model, tokenizer = load_model_and_tokenizer(
         model_name=args.model,
-        cache_dir="/path/to/your/cache_dir",
+        cache_dir="/jet/home/ehong/final_project/hg_cache", # replace with your own local path
         device=device,
         train_from_scratch=args.train_from_scratch,
         size_level=args.model_size_level,
