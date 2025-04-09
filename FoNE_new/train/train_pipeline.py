@@ -20,8 +20,10 @@ from train.eval import (
 )
 from utils.data_utils import collate_fn
 from number_encoders.FNE import FNE
+from number_encoders.RENE import RENE
 from number_encoders.XVAL import XVAL
 from number_encoders.vanilla import VanillaEmbedding
+from models.intermediate_network import MLPProjection, LinearProjection, IdentityProjection
 from utils.logger_utils import get_embedding_dim
 
 # --- Standard Helper Functions ---
@@ -67,7 +69,7 @@ def load_and_prepare_data(args, tokenizer):
         args.dataset, tokenizer, args.num_train_samples, args.num_test_samples, method=args.method
     )
     logging.info(f"2 data example: {train_data[:2]}")
-    num_token = tokenizer.convert_tokens_to_ids("[NUM]") if args.method in ['fne', 'xval', 'vanilla'] else None
+    num_token = tokenizer.convert_tokens_to_ids("[NUM]") if args.method in ['fne', 'xval', 'vanilla', 'rene'] else None
     return train_data, test_data, num_token
 
 def create_data_loaders(train_data, test_data, tokenizer, num_token, args):
@@ -112,7 +114,7 @@ def initialize_optimizer_and_scheduler(model, train_loader, args):
 
 # --- Training & Evaluation Functions (unchanged) ---
 
-def run_epoch(model, train_loader, test_loader, optimizer, scheduler, number_encoder, args, epoch, device, tokenizer=None):
+def run_epoch(model, train_loader, test_loader, optimizer, scheduler, number_encoder, intermediate_network, args, epoch, device, tokenizer=None):
     """
     Runs one training epoch and evaluates the model.
     """
@@ -121,12 +123,12 @@ def run_epoch(model, train_loader, test_loader, optimizer, scheduler, number_enc
         test_loss, (whole_number_accuracy, digit_wise_accuracy), mse, r2 = evaluate_regular(
             model, test_loader, tokenizer, device, print_labels=True, max_print_examples=5
         )
-    elif args.method == 'fne':
-        train_loss = train_fne(model, train_loader, number_encoder, optimizer, scheduler, args,
-                               args.int_digit_len, args.frac_digit_len, args.len_gen_size, device)
+    elif args.method in ['fne', 'rene']:
+        train_loss = train_fne(model, train_loader, number_encoder, intermediate_network, optimizer, scheduler, args,
+                               args.int_digit_len, args.frac_digit_len, args.len_gen_size, args.decoder_type, device)
         test_loss, (whole_number_accuracy, digit_wise_accuracy), mse, r2 = evaluate_fne(
-            model, test_loader, number_encoder, args.int_digit_len, args.frac_digit_len, device,
-            print_labels=True, max_print=5
+            model, test_loader, number_encoder, intermediate_network, args.int_digit_len, args.frac_digit_len, device,
+            print_labels=True, max_print=5, decoder_type=args.decoder_type, tokenizer=tokenizer
         )
     elif args.method == 'xval':
         train_loss = train_xval(model, train_loader, number_encoder, optimizer, scheduler, args, device)
@@ -134,9 +136,9 @@ def run_epoch(model, train_loader, test_loader, optimizer, scheduler, number_enc
             model, test_loader, number_encoder, device, print_labels=True, max_print=5
         )
     elif args.method == 'vanilla':
-        train_loss = train_vanilla(model, train_loader, number_encoder, optimizer, scheduler, args, device)
+        train_loss = train_vanilla(model, train_loader, number_encoder, intermediate_network, optimizer, scheduler, args, device)
         test_loss, (whole_number_accuracy, digit_wise_accuracy), mse, r2 = evaluate_vanilla(
-            model, test_loader, number_encoder, device, print_labels=True, max_print=5
+            model, test_loader, number_encoder, intermediate_network, device, print_labels=True, max_print=5
         )
     else:
         raise ValueError(f"Unsupported method '{args.method}'.")
@@ -163,7 +165,7 @@ def run_epoch(model, train_loader, test_loader, optimizer, scheduler, number_enc
     
     return whole_number_accuracy
 
-def evaluate_model(model, test_loader, tokenizer, number_encoder, args, device, stage="Initial"):
+def evaluate_model(model, test_loader, tokenizer, number_encoder, intermediate_network, args, device, stage="Initial"):
     """
     Evaluates the model on the test set.
     """
@@ -173,14 +175,18 @@ def evaluate_model(model, test_loader, tokenizer, number_encoder, args, device, 
         test_loss, (whole_number_accuracy, digit_wise_accuracy), mse, r2 = evaluate_regular(
             model, test_loader, tokenizer, device, print_labels=True, max_print_examples=10
         )
-    elif args.method == 'fne':
+    elif args.method in ['fne', 'rene']:
         test_loss, (whole_number_accuracy, digit_wise_accuracy), mse, r2 = evaluate_fne(
-            model, test_loader, number_encoder, args.int_digit_len, args.frac_digit_len, device,
-            print_labels=True, max_print=5
+            model, test_loader, number_encoder, intermediate_network, args.int_digit_len, args.frac_digit_len, device,
+            print_labels=True, max_print=5, decoder_type=args.decoder_type, tokenizer=tokenizer
         )
     elif args.method == 'xval':
         test_loss, (whole_number_accuracy, digit_wise_accuracy), mse, r2 = evaluate_xval(
             model, test_loader, number_encoder, device, print_labels=True, max_print=5
+        )
+    elif args.method == 'vanilla':
+        test_loss, (whole_number_accuracy, digit_wise_accuracy), mse, r2 = evaluate_vanilla(
+            model, test_loader, number_encoder, intermediate_network, device, print_labels=True, max_print=5
         )
     else:
         raise ValueError(f"Unsupported method '{args.method}'.")
@@ -208,7 +214,6 @@ def create_dataloader_and_train(args, model, tokenizer, device):
     """
     Prepares data loaders and executes the training and evaluation pipeline.
     """
-
     # Load text (or tabular) data using your existing function
     train_data, test_data, num_token = load_and_prepare_data(args, tokenizer)
     train_loader, test_loader = create_data_loaders(train_data, test_data, tokenizer, num_token, args)
@@ -216,9 +221,43 @@ def create_dataloader_and_train(args, model, tokenizer, device):
 
     # Initialize the appropriate number encoder based on the method
     number_encoder = None
+    intermediate_network = None
     embedding_dim = get_embedding_dim(model)
+    
+    # Initialize intermediate network
+    if args.intermediate_network == 'mlp':
+        intermediate_network = MLPProjection(
+            embedding_dim=embedding_dim,
+            hidden_dim=2048,
+            num_layers=2,
+            dropout=0.1,
+            device=device
+        ).to(device)
+    elif args.intermediate_network == 'linear':
+        intermediate_network = LinearProjection(
+            embedding_dim=embedding_dim,
+            hidden_dim=2048,
+            num_layers=2,
+            dropout=0.1,
+            device=device).to(device)
+    elif args.intermediate_network == 'identity':
+        intermediate_network = IdentityProjection(
+            embedding_dim=embedding_dim,
+            device=device).to(device)
+    else:
+        raise ValueError(f"Unsupported intermediate network '{args.intermediate_network}'.")
+
     if args.method == 'fne':
         number_encoder = FNE(
+            embedding_dim,
+            int_digit_len=args.int_digit_len,
+            frac_digit_len=args.frac_digit_len,
+            period_base_list=args.period_base_list,
+            add_linear=args.add_linear,
+            device=device
+        ).to(device)
+    elif args.method == 'rene':
+        number_encoder = RENE(
             embedding_dim,
             int_digit_len=args.int_digit_len,
             frac_digit_len=args.frac_digit_len,
@@ -239,17 +278,24 @@ def create_dataloader_and_train(args, model, tokenizer, device):
     
     # If no training samples are specified, run evaluation only
     if args.num_train_samples == 0:
-        evaluate_model(model, test_loader, tok, number_encoder, args, device, stage="Single Evaluation")
+        evaluate_model(model, test_loader, tok, number_encoder, intermediate_network, args, device, stage="Single Evaluation")
         return
     
     optimizer, scheduler = initialize_optimizer_and_scheduler(model, train_loader, args)
     
+    # Add intermediate network parameters to optimizer
+    optimizer = torch.optim.AdamW([
+        {'params': model.parameters()},
+        {'params': number_encoder.parameters()},
+        {'params': intermediate_network.parameters()}
+    ], lr=args.lr)
+    
     for epoch in range(args.epochs):
         logging.info('-' * 100)
         logging.info(f"Starting Epoch {epoch + 1}/{args.epochs}")
-        whole_number_accuracy = run_epoch(model, train_loader, test_loader, optimizer, scheduler, number_encoder, args, epoch, device, tok)
+        whole_number_accuracy = run_epoch(model, train_loader, test_loader, optimizer, scheduler, number_encoder, intermediate_network, args, epoch, device, tok)
         if whole_number_accuracy == 1.0:
             logging.info("Stopping early as whole number accuracy reached 100%.")
             break
     
-    evaluate_model(model, test_loader, tok, number_encoder, args, device, stage="Final")
+    evaluate_model(model, test_loader, tok, number_encoder, intermediate_network, args, device, stage="Final")

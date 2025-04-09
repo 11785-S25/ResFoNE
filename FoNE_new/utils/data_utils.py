@@ -45,7 +45,7 @@ def preprocess(entry, is_tabular, method='regular'):
     else:
         question, label = str(entry["question"]), float(entry["label"])
 
-    if method in ['fne', 'xval', 'vanilla']:
+    if method in ['fne', 'xval', 'vanilla', 'rene']:
         label = float(label)
         numbers = [float(num) for num in re.findall(r'\d+\.?\d*', question)]
         question = re.sub(r'\d+\.?\d*', ' [NUM] ', question)
@@ -69,7 +69,7 @@ def load_and_preprocess_dataset(dataset_name, tokenizer, num_train_samples=None,
 
     def preprocess_entry(entry):
         result = preprocess(entry, is_tabular, method)
-        if method in ['fne', 'xval', 'vanilla']:
+        if method in ['fne', 'xval', 'vanilla', 'rene']:
             input_text = result['question_with_num']
             input_ids = tokenizer.encode(input_text, return_tensors="pt").squeeze(0)
             return {
@@ -110,7 +110,7 @@ def collate_fn(batch, tokenizer, num_token_id=None, max_length=128, method='regu
     input_ids_padded = input_ids_padded[:, :max_length]
     attention_mask = (input_ids_padded != tokenizer.pad_token_id).long()
 
-    if method in ['fne', 'xval', 'vanilla']:
+    if method in ['fne', 'xval', 'vanilla', 'rene']:
         scatter_tensor = create_scatter_tensor(input_ids_padded, [item['numbers'] for item in batch], num_token_id)
         last_token_mask = torch.zeros_like(input_ids_padded, dtype=torch.float32)
         for i, seq in enumerate(input_ids_padded):

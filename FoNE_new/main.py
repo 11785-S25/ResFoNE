@@ -6,6 +6,7 @@ import wandb
 
 from utils.logger_utils import setup_logger, get_output_folder
 from utils.model_utils import load_model_and_tokenizer
+from utils.adapter_utils import load_model_with_parallel_adapters
 from train.train_pipeline import (
     parse_period_base_list,
     create_dataloader_and_train
@@ -26,8 +27,9 @@ def main():
     parser.add_argument('--frac_digit_len', type=int, default=0, help='Number of digits for fractional part')
     parser.add_argument('--len_gen_size', type=int, default=0, help='FNE: add k 0s after numbers to len gen')
     parser.add_argument('--lr', type=float, default=5e-5, help='Learning rate')
-    parser.add_argument('--name', type=str, default='test_run', help='Log name')
-    parser.add_argument('--model', type=str, default='gpt2', help='Model name')
+    parser.add_argument('--name', type=str, default='Euijin_test_', help='Log name')
+    parser.add_argument('--model', type=str, default='gpt2', choices=['gpt2', 'llama', 'bert'], help='Model name')
+    parser.add_argument('--intermediate_network', type=str or None, default=None, choices=['mlp', 'linear', 'identity', None], help='Intermediate network type: mlp, linear, nf, or identity (default)')
     parser.add_argument('--dataset', type=str, default='6_digits_add', help='Dataset name')
     parser.add_argument('--train_from_scratch', default=True, action='store_true', help='Train the model from scratch without pre-trained weights')
     parser.add_argument('--use_digit_wise_tokenizer', default=False, action='store_true', help='Whether to use digit-wise tokenizer')
@@ -35,11 +37,17 @@ def main():
     parser.add_argument('--num_test_samples', type=int, default=None, help='Number of test samples to use')
     parser.add_argument('--seed', type=int, default=42, help='Random seed for reproducibility')
     parser.add_argument('--model_size_level', type=int, default=-1, help='From 1 to 8, choose the model size for training from scratch')
-    parser.add_argument('--method', type=str, choices=['regular', 'fne', 'xval', 'vanilla'], default='fne', help='Training method: regular, fne, xval, or vanilla')
+    parser.add_argument('--method', type=str, choices=['regular', 'fne', 'xval', 'vanilla', 'rene'], default='fne', help='Training method: regular, fne, xval, vanilla, or rene')
     parser.add_argument('--scheduler_name', type=str, default='cosine', help='Name of the learning rate scheduler (e.g., linear, constant, cosine, etc.)')
     parser.add_argument('--period_base_list', type=str, nargs='+', default=[10.0], help='List of period bases for Fourier embedding (e.g., 2, 5, 1/3)')
     parser.add_argument('--clip', default=True, action='store_true', help='Enable clipping')
-    parser.add_argument('--not_add_linear', default=False, action='store_true', help='Do not add linear layer after FNE')
+    parser.add_argument('--not_add_linear', default=True, action='store_true', help='Do not add linear layer after FNE')
+    parser.add_argument('--decoder_type', type=str, default='fourier', choices=['fourier', 'greedy'], help='Decoder type: fourier or raw')
+    parser.add_argument('--adapter_type', type=str or None, default=None, choices=[None, 'linear', 'affine', 'low_rank'], help='Adapter type: None, linear, affine, or low_rank')
+    parser.add_argument('--rank', type=int, default=8, help='Rank for low-rank adapter')
+    parser.add_argument('--scaling', type=float, default=1.0, help='Scaling factor for adapter, range from 0.0 to 1.0')
+    parser.add_argument('--add_parallel_adapters', default=False, action='store_true', help='Add parallel adapters to the model')
+    parser.add_argument('--freeze_model', default=False, action='store_true', help='Freeze the LLM model')
     
     args = parser.parse_args()
     
@@ -47,7 +55,7 @@ def main():
     args.add_linear = not args.not_add_linear
     args.period_base_list = parse_period_base_list(args.period_base_list)
     
-    run_name = f"{args.name}{args.method}_{args.model}_{args.dataset}_seed{args.seed}"
+    run_name = f"{args.name}{args.method}_{args.model}_{args.dataset}_{args.num_train_samples}_seed{args.seed}"
     device = 'cuda' if torch.cuda.is_available() else 'cpu'
     
     torch.manual_seed(args.seed)
@@ -71,17 +79,21 @@ def main():
         logging.info(f"Dataset specified as tuple: {args.dataset}")
     else:
         logging.info(f"Dataset specified as single name: {args.dataset}")
-    # Load model and tokenizer
+    
+    # Load model and tokenizer with all necessary parameters
     model, tokenizer = load_model_and_tokenizer(
         model_name=args.model,
-        cache_dir="/jet/home/ehong/final_project/hg_cache", # replace with your own local path
+        cache_dir="/home/zhuominc/ejhong/hg_cache", # replace with your own local path
         device=device,
         train_from_scratch=args.train_from_scratch,
         size_level=args.model_size_level,
         use_digit_wise_tokenizer=args.use_digit_wise_tokenizer
     )
+
+    if args.add_parallel_adapters:
+        model = load_model_with_parallel_adapters(model, args.model, adapter_type=args.adapter_type, rank=args.rank, scaling=args.scaling)
     
-    # Run the training pipeline
+    # Run the training pipeline with all required arguments
     create_dataloader_and_train(args, model, tokenizer, device)
     
     wandb.finish()

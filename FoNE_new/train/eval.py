@@ -2,13 +2,18 @@ import torch
 import logging
 from .utils import is_numeric, get_regular_embeddings
 
-def evaluate_fne(model, test_loader, fne, int_digit_len, frac_digit_len, device, print_labels=False, max_print=10):
+def evaluate_fne(model, test_loader, number_encoder, intermediate_network, int_digit_len, frac_digit_len, device, print_labels=False, max_print=10, decoder_type='fourier', tokenizer=None):
     """
     Evaluation loop for Fourier Neural Embedding (FNE) based models.
+    
+    Parameters:
+        decoder_type: 'fourier' (default) or 'greedy'
+        tokenizer: Required when decoder_type is 'greedy'
     """
     logging.info('Evaluation start')
     model.eval()
-    fne.eval()
+    number_encoder.eval()
+    intermediate_network.eval()
     total_correct = 0
     total_samples = 0
     total_loss = 0
@@ -19,6 +24,9 @@ def evaluate_fne(model, test_loader, fne, int_digit_len, frac_digit_len, device,
     all_predictions = []
     mispredictions = []
 
+    if decoder_type == 'greedy' and tokenizer is None:
+        raise ValueError("Tokenizer is required when decoder_type is 'greedy'")
+
     with torch.no_grad():
         for batch_idx, batch in enumerate(test_loader):
             input_ids = batch['input_ids'].to(device)
@@ -28,51 +36,116 @@ def evaluate_fne(model, test_loader, fne, int_digit_len, frac_digit_len, device,
             last_token_mask = batch['last_token_mask'].to(device)
 
             regular_embeddings = get_regular_embeddings(model, input_ids)
-            fourier_embeddings = fne(scatter_tensor)
+            fourier_embeddings = number_encoder(scatter_tensor)
+            fourier_embeddings = intermediate_network(fourier_embeddings)
             input_embeddings = regular_embeddings + fourier_embeddings
 
             # modified part by EJ: match dtype of inputs same as model dtype
             input_embeddings = input_embeddings.to(model.dtype)
-            attention_mask = attention_mask.to(model.dtype)
+            attention_mask = attention_mask.to(model.dtype)     
 
-            outputs = model(inputs_embeds=input_embeddings, attention_mask=attention_mask, output_hidden_states=True)
-            before_decoder = outputs.hidden_states[-1]
-            last_token_hidden_state = (before_decoder * last_token_mask.unsqueeze(-1)).sum(dim=1)
+            if decoder_type == 'fourier':
+                outputs = model(inputs_embeds=input_embeddings, attention_mask=attention_mask, output_hidden_states=True)
+                before_decoder = outputs.hidden_states[-1]
+                last_token_hidden_state = (before_decoder * last_token_mask.unsqueeze(-1)).sum(dim=1)
+                
+                predicted_numbers = number_encoder.fourier_compute_prediction(last_token_hidden_state, int_digit_len, frac_digit_len)
+                
+                all_labels.append(labels.cpu())
+                all_predictions.append(predicted_numbers.cpu())
+                
+                tolerance = 10 ** (-frac_digit_len)
+                correct_predictions = torch.abs(predicted_numbers - labels) < tolerance
+                total_correct += correct_predictions.sum().item()
+                total_samples += labels.size(0)
 
-            predicted_numbers = fne.fourier_compute_prediction(last_token_hidden_state, int_digit_len, frac_digit_len)
+                for i in range(labels.size(0)):
+                    actual_value = str(labels[i].item())
+                    predicted_value = str(predicted_numbers[i].item())
+                    min_len = len(actual_value)
+                    correct_digits += sum(1 for a, p in zip(actual_value[:min_len], predicted_value[:min_len]) if a == p)
+                    total_digits += len(actual_value)
 
-            all_labels.append(labels.cpu())
-            all_predictions.append(predicted_numbers.cpu())
+                for i in range(labels.size(0)):
+                    if not correct_predictions[i]:
+                        mispredictions.append((predicted_numbers[i].item(), labels[i].item()))
 
-            tolerance = 10 ** (-frac_digit_len)
-            correct_predictions = torch.abs(predicted_numbers - labels) < tolerance
-            total_correct += correct_predictions.sum().item()
-            total_samples += labels.size(0)
+                squared_error = torch.sum((predicted_numbers - labels) ** 2).item()
+                total_squared_error += squared_error
 
-            for i in range(labels.size(0)):
-                actual_value = str(labels[i].item())
-                predicted_value = str(predicted_numbers[i].item())
-                min_len = len(actual_value)
-                correct_digits += sum(1 for a, p in zip(actual_value[:min_len], predicted_value[:min_len]) if a == p)
-                total_digits += len(actual_value)
+                loss = number_encoder.fourier_compute_loss(last_token_hidden_state, labels, int_digit_len, frac_digit_len)
+                total_loss += loss.item()
+            
+            elif decoder_type == 'greedy':
+                # Use the greedy decoding method from evaluate_regular
+                outputs = model(inputs_embeds=input_embeddings, attention_mask=attention_mask)
+                logits = outputs.logits
+                
+                # Get predictions using argmax
+                predictions = torch.argmax(logits, dim=-1)
+                
+                batch_correct = 0
+                batch_total = len(input_ids)
+                
+                for i in range(len(input_ids)):
+                    label_indices = (batch['labels'][i] != -100).nonzero(as_tuple=True)[0]
+                    actual_tokens = input_ids[i, label_indices].cpu().numpy()
+                    predicted_tokens = predictions[i, label_indices-1].cpu().numpy()
+                    
+                    actual_label = tokenizer.decode(actual_tokens, skip_special_tokens=True).strip()
+                    predicted_label = tokenizer.decode(predicted_tokens, skip_special_tokens=True).strip()
+                    
+                    # Convert to float for comparison
+                    if is_numeric(predicted_label) and is_numeric(actual_label):
+                        actual_value = float(actual_label)
+                        predicted_value = float(predicted_label)
+                        
+                        # Add to metrics
+                        if abs(predicted_value - actual_value) < 10 ** (-frac_digit_len):
+                            batch_correct += 1
+                        
+                        # Store for MSE calculation
+                        squared_error = (predicted_value - actual_value) ** 2
+                        total_squared_error += squared_error
+                        
+                        # For mispredictions
+                        if abs(predicted_value - actual_value) >= 10 ** (-frac_digit_len):
+                            mispredictions.append((predicted_value, actual_value))
+                            
+                        # Character-wise accuracy
+                        str_actual = str(actual_value)
+                        str_predicted = str(predicted_value)
+                        min_len = min(len(str_actual), len(str_predicted))
+                        correct_digits += sum(1 for a, p in zip(str_actual[:min_len], str_predicted[:min_len]) if a == p)
+                        total_digits += len(str_actual)
+                        
+                        # Collecting all labels and predictions for R2 calculation
+                        all_labels.append(actual_value)
+                        all_predictions.append(predicted_value)
+                
+                total_correct += batch_correct
+                total_samples += batch_total
+                
+                # Pseudo-loss for consistency in return values
+                total_loss += 0  # We don't have a proper loss here
 
-            for i in range(labels.size(0)):
-                if not correct_predictions[i]:
-                    mispredictions.append((predicted_numbers[i].item(), labels[i].item()))
-
-            squared_error = torch.sum((predicted_numbers - labels) ** 2).item()
-            total_squared_error += squared_error
-
-            loss = fne.fourier_compute_loss(last_token_hidden_state, labels, int_digit_len, frac_digit_len)
-            total_loss += loss.item()
-
-    all_labels = torch.cat(all_labels)
-    mean_label = all_labels.mean().item()
-    total_variance = torch.sum((all_labels - mean_label) ** 2).item()
+    # Calculate metrics based on decoder type
+    if decoder_type == 'fourier':
+        all_labels = torch.cat(all_labels)
+        mean_label = all_labels.mean().item()
+        total_variance = torch.sum((all_labels - mean_label) ** 2).item()
+    else:  # greedy
+        if all_labels:
+            mean_label = sum(all_labels) / len(all_labels)
+            total_variance = sum((label - mean_label) ** 2 for label in all_labels)
+        else:
+            mean_label = 0
+            total_variance = 0
+            raise ValueError("No labels found for greedy decoder")
 
     avg_loss = total_loss / len(test_loader)
     whole_number_accuracy = total_correct / total_samples
-    digit_wise_accuracy = correct_digits / total_digits
+    digit_wise_accuracy = correct_digits / total_digits if total_digits > 0 else 0
     mse = total_squared_error / total_samples
     r2 = 1 - (total_squared_error / total_variance) if total_variance > 0 else float('nan')
 
@@ -239,12 +312,13 @@ def evaluate_xval(model, test_loader, xval, device, print_labels=False, max_prin
 
     return avg_loss, (whole_number_accuracy, digit_wise_accuracy), mse, r2
 
-def evaluate_vanilla(model, test_loader, vanilla_model, device, print_labels=False, max_print=10):
+def evaluate_vanilla(model, test_loader, vanilla_model, intermediate_network, device, print_labels=False, max_print=10):
     """
     Evaluation loop for models using the vanilla embedding module.
     """
     model.eval()
     vanilla_model.eval()
+    intermediate_network.eval()
     total_correct = 0
     total_samples = 0
     total_loss = 0
@@ -263,7 +337,12 @@ def evaluate_vanilla(model, test_loader, vanilla_model, device, print_labels=Fal
 
             regular_embeddings = get_regular_embeddings(model, input_ids)
             vanilla_embeddings = vanilla_model(scatter_tensor)
+            vanilla_embeddings = intermediate_network(vanilla_embeddings)
             input_embeddings = regular_embeddings + vanilla_embeddings
+            
+            # Match dtype of inputs with model
+            input_embeddings = input_embeddings.to(model.dtype)
+            attention_mask = attention_mask.to(model.dtype)
 
             outputs = model(inputs_embeds=input_embeddings, attention_mask=attention_mask, output_hidden_states=True)
             last_hidden_state = outputs.hidden_states[-1]
