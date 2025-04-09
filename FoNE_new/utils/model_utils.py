@@ -1,6 +1,9 @@
 import torch
 import logging
 from transformers import AutoModelForCausalLM, AutoTokenizer, AutoConfig
+import torch.nn as nn
+from models.adapter import ParallelAdapter
+from transformers import GPT2Model, GPT2LMHeadModel
 
 # Model configuration table for custom initialization
 MODEL_CONFIG_TABLE = {

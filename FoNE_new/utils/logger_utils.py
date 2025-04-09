@@ -71,6 +71,15 @@ def get_output_folder(args):
             f"seed{args.seed}_"
             f"num_train_samples_{args.num_train_samples}_model_size_level_{args.model_size_level}"
         )
+    elif args.method == 'rene':
+        other_args = (
+            f"period_base_list_{args.period_base_list}_batchsize_{args.batch_size}_"
+            f"epochs_{args.epochs}_lr_{args.lr}_int_digit_len_{args.int_digit_len}_"
+            f"frac_digit_len_{args.frac_digit_len}_seed{args.seed}_"
+            f"num_train_samples_{args.num_train_samples}_model_size_level_{args.model_size_level}_lengensize_{args.len_gen_size}_addlinear_{not args.not_add_linear}"
+        )
+    else:
+        raise ValueError(f"Unsupported method: {args.method}")
 
     # Combine all parts into a structured output folder path
     output_folder = os.path.join("result",  name_folder, scratch_str, args.model,  dataset_name, method_str, other_args)
