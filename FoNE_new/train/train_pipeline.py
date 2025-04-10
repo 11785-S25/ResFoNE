@@ -125,7 +125,7 @@ def run_epoch(model, train_loader, test_loader, optimizer, scheduler, number_enc
         )
     elif args.method in ['fne', 'rene']:
         train_loss = train_fne(model, train_loader, number_encoder, intermediate_network, optimizer, scheduler, args,
-                               args.int_digit_len, args.frac_digit_len, args.len_gen_size, args.decoder_type, device)
+                               args.int_digit_len, args.frac_digit_len, args.len_gen_size, args.decoder_type, args.adapter_type, device)
         test_loss, (whole_number_accuracy, digit_wise_accuracy), mse, r2 = evaluate_fne(
             model, test_loader, number_encoder, intermediate_network, args.int_digit_len, args.frac_digit_len, device,
             print_labels=True, max_print=5, decoder_type=args.decoder_type, tokenizer=tokenizer
