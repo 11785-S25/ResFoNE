@@ -3,7 +3,7 @@ import torch
 import torch.nn as nn
 import types
 
-from adapter import ParallelAdapter
+from models.adapter import ParallelAdapter
 
 import inspect
 from transformers import PreTrainedModel
