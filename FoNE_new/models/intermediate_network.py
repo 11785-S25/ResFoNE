@@ -57,7 +57,8 @@ class LinearProjection(nn.Module):
         self.num_layers = num_layers
         self.device = device
 
-        self.final_layer = nn.Linear(hidden_dim, embedding_dim)
+        # Create a single linear layer that maps from embedding_dim to embedding_dim
+        self.final_layer = nn.Linear(embedding_dim, embedding_dim)
 
     def forward(self, x):
         x = self.final_layer(x)
