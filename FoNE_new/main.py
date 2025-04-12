@@ -29,7 +29,7 @@ def main():
     parser.add_argument('--lr', type=float, default=5e-5, help='Learning rate')
     parser.add_argument('--name', type=str, default='Euijin_test_', help='Log name')
     parser.add_argument('--model', type=str, default='gpt2', choices=['gpt2', 'llama', 'bert'], help='Model name')
-    parser.add_argument('--intermediate_network', type=str or None, default=None, choices=['mlp', 'linear', 'identity', None], help='Intermediate network type: mlp, linear, nf, or identity (default)')
+    parser.add_argument('--intermediate_network', type=str, default='identity', choices=['mlp', 'linear', 'identity'], help='Intermediate network type: mlp, linear, or identity (default)')
     parser.add_argument('--dataset', type=str, default='6_digits_add', help='Dataset name')
     parser.add_argument('--train_from_scratch', default=True, action='store_true', help='Train the model from scratch without pre-trained weights')
     parser.add_argument('--use_digit_wise_tokenizer', default=False, action='store_true', help='Whether to use digit-wise tokenizer')
