@@ -26,9 +26,15 @@ def train_fne(model, train_loader, number_encoder, intermediate_network, optimiz
         def patched_compute_prediction(self, last_hidden_state):
             return orig_compute_prediction(last_hidden_state, int_digit_len, frac_digit_len)
         
-        # Save original methods to restore later
+        # Save original methods and attributes to restore later
         number_encoder._original_compute_loss = getattr(number_encoder, 'compute_loss', None)
         number_encoder._original_compute_prediction = getattr(number_encoder, 'compute_prediction', None)
+        number_encoder._original_frac_digit_len = getattr(number_encoder, 'frac_digit_len', None)
+        number_encoder._original_int_digit_len = getattr(number_encoder, 'int_digit_len', None)
+        
+        # Add required attributes for vanilla training
+        number_encoder.frac_digit_len = frac_digit_len  # Add this attribute directly
+        number_encoder.int_digit_len = int_digit_len    # Also add int_digit_len for completeness
         
         # Add the patched methods
         import types
@@ -50,9 +56,22 @@ def train_fne(model, train_loader, number_encoder, intermediate_network, optimiz
             else:
                 delattr(number_encoder, 'compute_prediction')
                 
+            # Restore original attributes (or remove them if they didn't exist)
+            if number_encoder._original_frac_digit_len is not None:
+                number_encoder.frac_digit_len = number_encoder._original_frac_digit_len
+            else:
+                delattr(number_encoder, 'frac_digit_len')
+                
+            if number_encoder._original_int_digit_len is not None:
+                number_encoder.int_digit_len = number_encoder._original_int_digit_len
+            else:
+                delattr(number_encoder, 'int_digit_len')
+                
             # Clean up temporary attributes
             delattr(number_encoder, '_original_compute_loss')
             delattr(number_encoder, '_original_compute_prediction')
+            delattr(number_encoder, '_original_frac_digit_len')
+            delattr(number_encoder, '_original_int_digit_len')
     
     # Ensure the tokenizer is provided when using greedy decoder
     if decoder_type == 'greedy' and tokenizer is None:
