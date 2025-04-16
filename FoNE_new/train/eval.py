@@ -10,6 +10,49 @@ def evaluate_fne(model, test_loader, number_encoder, intermediate_network, int_d
         decoder_type: 'fourier' (default) or 'greedy'
         tokenizer: Required when decoder_type is 'greedy'
     """
+    # If using greedy decoder, delegate to evaluate_vanilla
+    if decoder_type == 'greedy':
+        logging.info("Using vanilla evaluation method for greedy decoder")
+        
+        # Create adapter methods for the FNE interface
+        orig_compute_loss = number_encoder.fourier_compute_loss
+        orig_compute_prediction = number_encoder.fourier_compute_prediction
+        
+        # Monkey patch the methods temporarily
+        def patched_compute_loss(self, last_hidden_state, label):
+            return orig_compute_loss(last_hidden_state, label, int_digit_len, frac_digit_len)
+            
+        def patched_compute_prediction(self, last_hidden_state):
+            return orig_compute_prediction(last_hidden_state, int_digit_len, frac_digit_len)
+        
+        # Save original methods to restore later
+        number_encoder._original_compute_loss = getattr(number_encoder, 'compute_loss', None)
+        number_encoder._original_compute_prediction = getattr(number_encoder, 'compute_prediction', None)
+        
+        # Add the patched methods
+        import types
+        number_encoder.compute_loss = types.MethodType(patched_compute_loss, number_encoder)
+        number_encoder.compute_prediction = types.MethodType(patched_compute_prediction, number_encoder)
+        
+        try:
+            # Run evaluation with patched encoder
+            return evaluate_vanilla(model, test_loader, number_encoder, intermediate_network, device, print_labels, max_print)
+        finally:
+            # Restore original methods
+            if number_encoder._original_compute_loss is not None:
+                number_encoder.compute_loss = number_encoder._original_compute_loss
+            else:
+                delattr(number_encoder, 'compute_loss')
+                
+            if number_encoder._original_compute_prediction is not None:
+                number_encoder.compute_prediction = number_encoder._original_compute_prediction
+            else:
+                delattr(number_encoder, 'compute_prediction')
+                
+            # Clean up temporary attributes
+            delattr(number_encoder, '_original_compute_loss')
+            delattr(number_encoder, '_original_compute_prediction')
+    
     logging.info('Evaluation start')
     model.eval()
     number_encoder.eval()
@@ -44,107 +87,42 @@ def evaluate_fne(model, test_loader, number_encoder, intermediate_network, int_d
             input_embeddings = input_embeddings.to(model.dtype)
             attention_mask = attention_mask.to(model.dtype)     
 
-            if decoder_type == 'fourier':
-                outputs = model(inputs_embeds=input_embeddings, attention_mask=attention_mask, output_hidden_states=True)
-                before_decoder = outputs.hidden_states[-1]
-                last_token_hidden_state = (before_decoder * last_token_mask.unsqueeze(-1)).sum(dim=1)
-                
-                predicted_numbers = number_encoder.fourier_compute_prediction(last_token_hidden_state, int_digit_len, frac_digit_len)
-                
-                all_labels.append(labels.cpu())
-                all_predictions.append(predicted_numbers.cpu())
-                
-                tolerance = 10 ** (-frac_digit_len)
-                correct_predictions = torch.abs(predicted_numbers - labels) < tolerance
-                total_correct += correct_predictions.sum().item()
-                total_samples += labels.size(0)
-
-                for i in range(labels.size(0)):
-                    actual_value = str(labels[i].item())
-                    predicted_value = str(predicted_numbers[i].item())
-                    min_len = len(actual_value)
-                    correct_digits += sum(1 for a, p in zip(actual_value[:min_len], predicted_value[:min_len]) if a == p)
-                    total_digits += len(actual_value)
-
-                for i in range(labels.size(0)):
-                    if not correct_predictions[i]:
-                        mispredictions.append((predicted_numbers[i].item(), labels[i].item()))
-
-                squared_error = torch.sum((predicted_numbers - labels) ** 2).item()
-                total_squared_error += squared_error
-
-                loss = number_encoder.fourier_compute_loss(last_token_hidden_state, labels, int_digit_len, frac_digit_len)
-                total_loss += loss.item()
+            outputs = model(inputs_embeds=input_embeddings, attention_mask=attention_mask, output_hidden_states=True)
+            before_decoder = outputs.hidden_states[-1]
+            last_token_hidden_state = (before_decoder * last_token_mask.unsqueeze(-1)).sum(dim=1)
             
-            elif decoder_type == 'greedy':
-                # For greedy decoder, use a consistent approach with fourier embeddings
-                outputs = model(
-                    inputs_embeds=input_embeddings, 
-                    attention_mask=attention_mask, 
-                    output_hidden_states=True,
-                    fourier_embeddings=fourier_embeddings  # Pass this to use adapter mechanism correctly
-                )
-                
-                # Get the last hidden states for FNE prediction
-                before_decoder = outputs.hidden_states[-1]
-                last_token_hidden_state = (before_decoder * last_token_mask.unsqueeze(-1)).sum(dim=1)
-                
-                # Use the FNE compute_prediction function
-                predicted_numbers = number_encoder.fourier_compute_prediction(
-                    last_token_hidden_state, int_digit_len, frac_digit_len
-                )
-                
-                # Calculate loss using FNE loss function
-                loss = number_encoder.fourier_compute_loss(
-                    last_token_hidden_state, labels, int_digit_len, frac_digit_len
-                )
-                total_loss += loss.item()
-                
-                # Calculate accuracy metrics
-                tolerance = 10 ** (-frac_digit_len)
-                correct_predictions = torch.abs(predicted_numbers - labels) < tolerance
-                total_correct += correct_predictions.sum().item()
-                total_samples += labels.size(0)
-                
-                # Store for results
-                all_labels.append(labels.cpu())
-                all_predictions.append(predicted_numbers.cpu())
-                
-                # Calculate digit-wise accuracy
-                for i in range(labels.size(0)):
-                    actual_value = str(labels[i].item())
-                    predicted_value = str(predicted_numbers[i].item())
-                    min_len = min(len(actual_value), len(predicted_value))
-                    correct_digits += sum(1 for a, p in zip(actual_value[:min_len], predicted_value[:min_len]) if a == p)
-                    total_digits += len(actual_value)
-                
-                # Record mispredictions
-                for i in range(labels.size(0)):
-                    if not correct_predictions[i]:
-                        mispredictions.append((predicted_numbers[i].item(), labels[i].item()))
-                
-                # Calculate squared error for MSE
-                squared_error = torch.sum((predicted_numbers - labels) ** 2).item()
-                total_squared_error += squared_error
-                
-                # Print examples
-                if print_labels:
-                    output_pairs = []
-                    for i in range(min(max_print, labels.size(0))):
-                        output_pairs.append((predicted_numbers[i].item(), labels[i].item()))
-                    if output_pairs:
-                        logging.info("Predictions and Labels: " + " ".join(f"({pred:.4f},{lbl:.4f})" for pred, lbl in output_pairs))
+            predicted_numbers = number_encoder.fourier_compute_prediction(last_token_hidden_state, int_digit_len, frac_digit_len)
+            
+            all_labels.append(labels.cpu())
+            all_predictions.append(predicted_numbers.cpu())
+            
+            tolerance = 10 ** (-frac_digit_len)
+            correct_predictions = torch.abs(predicted_numbers - labels) < tolerance
+            total_correct += correct_predictions.sum().item()
+            total_samples += labels.size(0)
 
-    # Calculate metrics based on decoder type
-    if decoder_type == 'fourier':
-        # For fourier decoder, all_labels is a list of tensors
-        all_labels = torch.cat(all_labels)
-        mean_label = all_labels.mean().item()
-        total_variance = torch.sum((all_labels - mean_label) ** 2).item()
-    else:  # greedy - use same approach 
-        all_labels = torch.cat(all_labels)
-        mean_label = all_labels.mean().item()
-        total_variance = torch.sum((all_labels - mean_label) ** 2).item()
+            for i in range(labels.size(0)):
+                actual_value = str(labels[i].item())
+                predicted_value = str(predicted_numbers[i].item())
+                min_len = len(actual_value)
+                correct_digits += sum(1 for a, p in zip(actual_value[:min_len], predicted_value[:min_len]) if a == p)
+                total_digits += len(actual_value)
+
+            for i in range(labels.size(0)):
+                if not correct_predictions[i]:
+                    mispredictions.append((predicted_numbers[i].item(), labels[i].item()))
+
+            squared_error = torch.sum((predicted_numbers - labels) ** 2).item()
+            total_squared_error += squared_error
+
+            loss = number_encoder.fourier_compute_loss(last_token_hidden_state, labels, int_digit_len, frac_digit_len)
+            total_loss += loss.item()
+
+    # Calculate metrics
+    # For fourier decoder, all_labels is a list of tensors
+    all_labels = torch.cat(all_labels)
+    mean_label = all_labels.mean().item()
+    total_variance = torch.sum((all_labels - mean_label) ** 2).item()
 
     # Calculate final metrics
     avg_loss = total_loss / len(test_loader)

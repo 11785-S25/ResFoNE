@@ -11,6 +11,49 @@ def train_fne(model, train_loader, number_encoder, intermediate_network, optimiz
     Parameters:
         tokenizer: Required when decoder_type is 'greedy'
     """
+    # If using greedy decoder, delegate to train_vanilla
+    if decoder_type == 'greedy':
+        logging.info("Using vanilla training method for greedy decoder")
+        
+        # Create a simple adapter function for the compute_loss method
+        orig_compute_loss = number_encoder.fourier_compute_loss
+        orig_compute_prediction = number_encoder.fourier_compute_prediction
+        
+        # Monkey patch the methods temporarily
+        def patched_compute_loss(self, last_hidden_state, label):
+            return orig_compute_loss(last_hidden_state, label, int_digit_len, frac_digit_len)
+            
+        def patched_compute_prediction(self, last_hidden_state):
+            return orig_compute_prediction(last_hidden_state, int_digit_len, frac_digit_len)
+        
+        # Save original methods to restore later
+        number_encoder._original_compute_loss = getattr(number_encoder, 'compute_loss', None)
+        number_encoder._original_compute_prediction = getattr(number_encoder, 'compute_prediction', None)
+        
+        # Add the patched methods
+        import types
+        number_encoder.compute_loss = types.MethodType(patched_compute_loss, number_encoder)
+        number_encoder.compute_prediction = types.MethodType(patched_compute_prediction, number_encoder)
+        
+        try:
+            # Run training with patched encoder
+            return train_vanilla(model, train_loader, number_encoder, intermediate_network, optimizer, scheduler, args, device)
+        finally:
+            # Restore original methods
+            if number_encoder._original_compute_loss is not None:
+                number_encoder.compute_loss = number_encoder._original_compute_loss
+            else:
+                delattr(number_encoder, 'compute_loss')
+                
+            if number_encoder._original_compute_prediction is not None:
+                number_encoder.compute_prediction = number_encoder._original_compute_prediction
+            else:
+                delattr(number_encoder, 'compute_prediction')
+                
+            # Clean up temporary attributes
+            delattr(number_encoder, '_original_compute_loss')
+            delattr(number_encoder, '_original_compute_prediction')
+    
     # Ensure the tokenizer is provided when using greedy decoder
     if decoder_type == 'greedy' and tokenizer is None:
         raise ValueError("Tokenizer is required when decoder_type is 'greedy'")
@@ -67,50 +110,15 @@ def train_fne(model, train_loader, number_encoder, intermediate_network, optimiz
             
             # Forward pass through the model (now with gradients)
             if adapter_type is None:
-                if decoder_type == 'greedy':
-                    # Use train_regular approach - pass labels to model directly
-                    outputs = model(input_ids=input_ids, attention_mask=attention_mask, labels=labels)
-                else:
-                    # For Fourier decoder
-                    outputs = model(inputs_embeds=combined_embeddings, attention_mask=attention_mask, output_hidden_states=True)
+                outputs = model(inputs_embeds=combined_embeddings, attention_mask=attention_mask, output_hidden_states=True)
             elif adapter_type == 'linear' or adapter_type == 'affine' or adapter_type == 'low_rank':
-                if decoder_type == 'greedy':
-                    # Use train_regular approach - pass labels to model directly
-                    outputs = model(input_ids=input_ids, attention_mask=attention_mask, labels=labels, fourier_embeddings=fourier_embeddings)
-                else:
-                    # For Fourier decoder with adapters
-                    outputs = model(inputs_embeds=combined_embeddings, attention_mask=attention_mask, output_hidden_states=True, fourier_embeddings=fourier_embeddings)
+                outputs = model(inputs_embeds=combined_embeddings, attention_mask=attention_mask, output_hidden_states=True, fourier_embeddings=fourier_embeddings)
             else:
                 raise ValueError(f"Unsupported adapter type '{adapter_type}'.")
             
-
-            if decoder_type == 'fourier':
-                before_decoder = outputs.hidden_states[-1]
-                last_token_hidden_state = (before_decoder * last_token_mask.unsqueeze(-1)).sum(dim=1)
-                loss = number_encoder.fourier_compute_loss(last_token_hidden_state, labels, int_digit_len, frac_digit_len, len_gen=len_gen)
-            elif decoder_type == 'greedy':
-                # Use the train_regular approach for loss calculation
-                if hasattr(outputs, 'loss') and outputs.loss is not None:
-                    # Use the model's built-in loss calculation
-                    loss = outputs.loss
-                    logging.info(f"Using model's built-in loss for greedy decoder")
-                else:
-                    # If no loss is provided by the model, compute it manually
-                    logging.warning("Model did not return a loss. Computing cross-entropy loss manually.")
-                    logits = outputs.logits
-                    
-                    # Shift logits and labels for next token prediction
-                    shift_logits = logits[:, :-1, :].contiguous()
-                    shift_labels = labels[:, 1:].contiguous()
-                    
-                    # Replace padding tokens with -100 to ignore them in loss
-                    shift_labels[shift_labels == tokenizer.pad_token_id] = -100
-                    
-                    # Cross entropy loss
-                    loss_fct = torch.nn.CrossEntropyLoss()
-                    loss = loss_fct(shift_logits.view(-1, shift_logits.size(-1)), shift_labels.view(-1))
-            else:
-                raise ValueError(f"Unsupported decoder type '{decoder_type}'.")
+            before_decoder = outputs.hidden_states[-1]
+            last_token_hidden_state = (before_decoder * last_token_mask.unsqueeze(-1)).sum(dim=1)
+            loss = number_encoder.fourier_compute_loss(last_token_hidden_state, labels, int_digit_len, frac_digit_len, len_gen=len_gen)
 
             loss.backward()
             

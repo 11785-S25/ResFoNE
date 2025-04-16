@@ -125,12 +125,18 @@ def run_epoch(model, train_loader, test_loader, optimizer, scheduler, number_enc
             model, test_loader, tokenizer, device, print_labels=True, max_print_examples=5
         )
     elif args.method in ['fne', 'rene']:
-        train_loss = train_fne(model, train_loader, number_encoder, intermediate_network, optimizer, scheduler, args,
-                               args.int_digit_len, args.frac_digit_len, args.len_gen_size, args.decoder_type, args.adapter_type, device,
-                               tokenizer=tokenizer if args.decoder_type == 'greedy' else None)
+        # For FNE/RENE with greedy decoder, we need the tokenizer parameter
+        use_tokenizer = tokenizer if args.decoder_type == 'greedy' else None
+        
+        train_loss = train_fne(
+            model, train_loader, number_encoder, intermediate_network, optimizer, scheduler, args,
+            args.int_digit_len, args.frac_digit_len, args.len_gen_size, args.decoder_type, args.adapter_type, device,
+            tokenizer=use_tokenizer
+        )
+        
         test_loss, (whole_number_accuracy, digit_wise_accuracy), mse, r2 = evaluate_fne(
             model, test_loader, number_encoder, intermediate_network, args.int_digit_len, args.frac_digit_len, device,
-            print_labels=True, max_print=5, decoder_type=args.decoder_type, tokenizer=tokenizer if args.decoder_type == 'greedy' else None
+            print_labels=True, max_print=5, decoder_type=args.decoder_type, tokenizer=use_tokenizer
         )
     elif args.method == 'xval':
         train_loss = train_xval(model, train_loader, number_encoder, optimizer, scheduler, args, device)
@@ -178,9 +184,12 @@ def evaluate_model(model, test_loader, tokenizer, number_encoder, intermediate_n
             model, test_loader, tokenizer, device, print_labels=True, max_print_examples=10
         )
     elif args.method in ['fne', 'rene']:
+        # For FNE/RENE with greedy decoder, we need the tokenizer parameter
+        use_tokenizer = tokenizer if args.decoder_type == 'greedy' else None
+        
         test_loss, (whole_number_accuracy, digit_wise_accuracy), mse, r2 = evaluate_fne(
             model, test_loader, number_encoder, intermediate_network, args.int_digit_len, args.frac_digit_len, device,
-            print_labels=True, max_print=5, decoder_type=args.decoder_type, tokenizer=tokenizer
+            print_labels=True, max_print=5, decoder_type=args.decoder_type, tokenizer=use_tokenizer
         )
     elif args.method == 'xval':
         test_loss, (whole_number_accuracy, digit_wise_accuracy), mse, r2 = evaluate_xval(
