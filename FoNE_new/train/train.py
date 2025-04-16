@@ -1,17 +1,40 @@
 import torch
 import logging
+import sys
 from train.utils import get_regular_embeddings, handle_nan_loss
 
-def train_fne(model, train_loader, number_encoder, intermediate_network, optimizer, scheduler, args, int_digit_len, frac_digit_len, len_gen_size, decoder_type, adapter_type, device):
+def train_fne(model, train_loader, number_encoder, intermediate_network, optimizer, scheduler, args, int_digit_len, frac_digit_len, len_gen_size, decoder_type, adapter_type, device, tokenizer=None):
     """
     Training loop for Fourier Neural Embedding (FNE) based models with intermediate network.
     LLM parameters are now trainable along with FNE and intermediate network.
+    
+    Parameters:
+        tokenizer: Required when decoder_type is 'greedy'
     """
-    # Set all models to training mode
+    # Ensure the tokenizer is provided when using greedy decoder
+    if decoder_type == 'greedy' and tokenizer is None:
+        raise ValueError("Tokenizer is required when decoder_type is 'greedy'")
+        
+    # Ensure everything is on the same device
+    model = model.to(device)
+    number_encoder = number_encoder.to(device)
+    if intermediate_network is not None:
+        intermediate_network = intermediate_network.to(device)
+    
+    # Set training mode for each component individually
     if not args.freeze_model:
-        model.train()
+        for param in model.parameters():
+            param.requires_grad = True
+        # Set training mode without recursion
+        if hasattr(model, 'training'):
+            object.__setattr__(model, 'training', True)
     else:
-        model.eval()
+        for param in model.parameters():
+            param.requires_grad = False
+        # Set eval mode without recursion
+        if hasattr(model, 'training'):
+            object.__setattr__(model, 'training', False)
+    
     number_encoder.train()
     if intermediate_network is not None:
         intermediate_network.train()
@@ -19,58 +42,95 @@ def train_fne(model, train_loader, number_encoder, intermediate_network, optimiz
     total_loss = 0
 
     for batch_idx, batch in enumerate(train_loader):
-        input_ids = batch['input_ids'].to(device)
-        scatter_tensor = batch['scatter_tensor'].to(device)
-        attention_mask = batch['attention_mask'].to(device)
-        labels = batch['labels'].to(device)
-        last_token_mask = batch['last_token_mask'].to(device)
-        len_gen = torch.randint(0, len_gen_size+1, (1,), device=device).item()
-        
-        # Get regular embeddings (now with gradients)
-        regular_embeddings = get_regular_embeddings(model, input_ids)
-        
-        fourier_embeddings = number_encoder(scatter_tensor, len_gen=len_gen)
-        # Apply intermediate network to the combined embeddings
-        if intermediate_network is not None:
-            fourier_embeddings = intermediate_network(fourier_embeddings)
-        
-        combined_embeddings = regular_embeddings + fourier_embeddings
-        
-        # modified part by EJ: match dtype of inputs same as model dtype
-        combined_embeddings = combined_embeddings.to(model.dtype)
-        attention_mask = attention_mask.to(model.dtype)
+        try:
+            input_ids = batch['input_ids'].to(device)
+            scatter_tensor = batch['scatter_tensor'].to(device)
+            attention_mask = batch['attention_mask'].to(device)
+            labels = batch['labels'].to(device)
+            last_token_mask = batch['last_token_mask'].to(device)
+            len_gen = torch.randint(0, len_gen_size+1, (1,), device=device).item()
+            
+            # Get regular embeddings (now with gradients)
+            regular_embeddings = get_regular_embeddings(model, input_ids)
+            
+            fourier_embeddings = number_encoder(scatter_tensor, len_gen=len_gen)
+            # Apply intermediate network to the combined embeddings
+            if intermediate_network is not None:
+                fourier_embeddings = intermediate_network(fourier_embeddings)
+            
+            combined_embeddings = regular_embeddings + fourier_embeddings
+            
+            # modified part by EJ: match dtype of inputs same as model dtype
+            combined_embeddings = combined_embeddings.to(device=device, dtype=model.dtype)
+            attention_mask = attention_mask.to(device=device, dtype=model.dtype)
+            fourier_embeddings = fourier_embeddings.to(device=device, dtype=model.dtype)
+            
+            # Forward pass through the model (now with gradients)
+            if adapter_type is None:
+                if decoder_type == 'greedy':
+                    # Use train_regular approach - pass labels to model directly
+                    outputs = model(input_ids=input_ids, attention_mask=attention_mask, labels=labels)
+                else:
+                    # For Fourier decoder
+                    outputs = model(inputs_embeds=combined_embeddings, attention_mask=attention_mask, output_hidden_states=True)
+            elif adapter_type == 'linear' or adapter_type == 'affine' or adapter_type == 'low_rank':
+                if decoder_type == 'greedy':
+                    # Use train_regular approach - pass labels to model directly
+                    outputs = model(input_ids=input_ids, attention_mask=attention_mask, labels=labels, fourier_embeddings=fourier_embeddings)
+                else:
+                    # For Fourier decoder with adapters
+                    outputs = model(inputs_embeds=combined_embeddings, attention_mask=attention_mask, output_hidden_states=True, fourier_embeddings=fourier_embeddings)
+            else:
+                raise ValueError(f"Unsupported adapter type '{adapter_type}'.")
+            
 
-        # Forward pass through the model (now with gradients)
-        if adapter_type is None:
-            outputs = model(inputs_embeds=combined_embeddings, attention_mask=attention_mask, output_hidden_states=True)
-        elif adapter_type == 'linear' or adapter_type == 'low_rank':
-            outputs = model(inputs_embeds=combined_embeddings, attention_mask=attention_mask, output_hidden_states=True)
-        else:
-            raise ValueError(f"Unsupported adapter type '{adapter_type}'.") 
-        
+            if decoder_type == 'fourier':
+                before_decoder = outputs.hidden_states[-1]
+                last_token_hidden_state = (before_decoder * last_token_mask.unsqueeze(-1)).sum(dim=1)
+                loss = number_encoder.fourier_compute_loss(last_token_hidden_state, labels, int_digit_len, frac_digit_len, len_gen=len_gen)
+            elif decoder_type == 'greedy':
+                # Use the train_regular approach for loss calculation
+                if hasattr(outputs, 'loss') and outputs.loss is not None:
+                    # Use the model's built-in loss calculation
+                    loss = outputs.loss
+                    logging.info(f"Using model's built-in loss for greedy decoder")
+                else:
+                    # If no loss is provided by the model, compute it manually
+                    logging.warning("Model did not return a loss. Computing cross-entropy loss manually.")
+                    logits = outputs.logits
+                    
+                    # Shift logits and labels for next token prediction
+                    shift_logits = logits[:, :-1, :].contiguous()
+                    shift_labels = labels[:, 1:].contiguous()
+                    
+                    # Replace padding tokens with -100 to ignore them in loss
+                    shift_labels[shift_labels == tokenizer.pad_token_id] = -100
+                    
+                    # Cross entropy loss
+                    loss_fct = torch.nn.CrossEntropyLoss()
+                    loss = loss_fct(shift_logits.view(-1, shift_logits.size(-1)), shift_labels.view(-1))
+            else:
+                raise ValueError(f"Unsupported decoder type '{decoder_type}'.")
 
-        if decoder_type == 'fourier':
-            before_decoder = outputs.hidden_states[-1]
-            last_token_hidden_state = (before_decoder * last_token_mask.unsqueeze(-1)).sum(dim=1)
-            loss = number_encoder.fourier_compute_loss(last_token_hidden_state, labels, int_digit_len, frac_digit_len, len_gen=len_gen)
-        elif decoder_type == 'greedy':
-            loss = outputs.loss
-        else:
-            raise ValueError(f"Unsupported decoder type '{decoder_type}'.")
+            loss.backward()
+            
+            if args.clip:
+                # Clip gradients for all parameters
+                torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
+                torch.nn.utils.clip_grad_norm_(number_encoder.parameters(), max_norm=1.0)
+                torch.nn.utils.clip_grad_norm_(intermediate_network.parameters(), max_norm=1.0)
 
-        loss.backward()
-        
-        if args.clip:
-            # Clip gradients for all parameters
-            torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
-            torch.nn.utils.clip_grad_norm_(number_encoder.parameters(), max_norm=1.0)
-            torch.nn.utils.clip_grad_norm_(intermediate_network.parameters(), max_norm=1.0)
+            optimizer.step()
+            scheduler.step()
+            optimizer.zero_grad()
 
-        optimizer.step()
-        scheduler.step()
-        optimizer.zero_grad()
-
-        total_loss += loss.item()
+            total_loss += loss.item()
+            
+        except Exception as e:
+            logging.error(f"Error processing batch {batch_idx}: {str(e)}")
+            import traceback
+            logging.error(traceback.format_exc())
+            continue
 
     logging.info(f"avg Loss: {total_loss / len(train_loader)}")
     return total_loss / len(train_loader)

@@ -46,6 +46,9 @@ class ParallelAdapter(nn.Module):
         """
         if self.adapter_type == "linear":
             return self.adapter(embeddings) * self.scaling
-        
+        elif self.adapter_type == "affine":
+            return self.adapter(embeddings) * self.scaling
         elif self.adapter_type == "low_rank":
             return self.up_proj(self.down_proj(embeddings)) * self.scaling
+        else:
+            raise ValueError(f"Unsupported adapter type '{self.adapter_type}' in forward pass")

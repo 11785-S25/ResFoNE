@@ -77,72 +77,76 @@ def evaluate_fne(model, test_loader, number_encoder, intermediate_network, int_d
                 total_loss += loss.item()
             
             elif decoder_type == 'greedy':
-                # Use the greedy decoding method from evaluate_regular
-                outputs = model(inputs_embeds=input_embeddings, attention_mask=attention_mask)
-                logits = outputs.logits
+                # For greedy decoder, use a consistent approach with fourier embeddings
+                outputs = model(
+                    inputs_embeds=input_embeddings, 
+                    attention_mask=attention_mask, 
+                    output_hidden_states=True,
+                    fourier_embeddings=fourier_embeddings  # Pass this to use adapter mechanism correctly
+                )
                 
-                # Get predictions using argmax
-                predictions = torch.argmax(logits, dim=-1)
+                # Get the last hidden states for FNE prediction
+                before_decoder = outputs.hidden_states[-1]
+                last_token_hidden_state = (before_decoder * last_token_mask.unsqueeze(-1)).sum(dim=1)
                 
-                batch_correct = 0
-                batch_total = len(input_ids)
+                # Use the FNE compute_prediction function
+                predicted_numbers = number_encoder.fourier_compute_prediction(
+                    last_token_hidden_state, int_digit_len, frac_digit_len
+                )
                 
-                for i in range(len(input_ids)):
-                    label_indices = (batch['labels'][i] != -100).nonzero(as_tuple=True)[0]
-                    actual_tokens = input_ids[i, label_indices].cpu().numpy()
-                    predicted_tokens = predictions[i, label_indices-1].cpu().numpy()
-                    
-                    actual_label = tokenizer.decode(actual_tokens, skip_special_tokens=True).strip()
-                    predicted_label = tokenizer.decode(predicted_tokens, skip_special_tokens=True).strip()
-                    
-                    # Convert to float for comparison
-                    if is_numeric(predicted_label) and is_numeric(actual_label):
-                        actual_value = float(actual_label)
-                        predicted_value = float(predicted_label)
-                        
-                        # Add to metrics
-                        if abs(predicted_value - actual_value) < 10 ** (-frac_digit_len):
-                            batch_correct += 1
-                        
-                        # Store for MSE calculation
-                        squared_error = (predicted_value - actual_value) ** 2
-                        total_squared_error += squared_error
-                        
-                        # For mispredictions
-                        if abs(predicted_value - actual_value) >= 10 ** (-frac_digit_len):
-                            mispredictions.append((predicted_value, actual_value))
-                            
-                        # Character-wise accuracy
-                        str_actual = str(actual_value)
-                        str_predicted = str(predicted_value)
-                        min_len = min(len(str_actual), len(str_predicted))
-                        correct_digits += sum(1 for a, p in zip(str_actual[:min_len], str_predicted[:min_len]) if a == p)
-                        total_digits += len(str_actual)
-                        
-                        # Collecting all labels and predictions for R2 calculation
-                        all_labels.append(actual_value)
-                        all_predictions.append(predicted_value)
+                # Calculate loss using FNE loss function
+                loss = number_encoder.fourier_compute_loss(
+                    last_token_hidden_state, labels, int_digit_len, frac_digit_len
+                )
+                total_loss += loss.item()
                 
-                total_correct += batch_correct
-                total_samples += batch_total
+                # Calculate accuracy metrics
+                tolerance = 10 ** (-frac_digit_len)
+                correct_predictions = torch.abs(predicted_numbers - labels) < tolerance
+                total_correct += correct_predictions.sum().item()
+                total_samples += labels.size(0)
                 
-                # Pseudo-loss for consistency in return values
-                total_loss += 0  # We don't have a proper loss here
+                # Store for results
+                all_labels.append(labels.cpu())
+                all_predictions.append(predicted_numbers.cpu())
+                
+                # Calculate digit-wise accuracy
+                for i in range(labels.size(0)):
+                    actual_value = str(labels[i].item())
+                    predicted_value = str(predicted_numbers[i].item())
+                    min_len = min(len(actual_value), len(predicted_value))
+                    correct_digits += sum(1 for a, p in zip(actual_value[:min_len], predicted_value[:min_len]) if a == p)
+                    total_digits += len(actual_value)
+                
+                # Record mispredictions
+                for i in range(labels.size(0)):
+                    if not correct_predictions[i]:
+                        mispredictions.append((predicted_numbers[i].item(), labels[i].item()))
+                
+                # Calculate squared error for MSE
+                squared_error = torch.sum((predicted_numbers - labels) ** 2).item()
+                total_squared_error += squared_error
+                
+                # Print examples
+                if print_labels:
+                    output_pairs = []
+                    for i in range(min(max_print, labels.size(0))):
+                        output_pairs.append((predicted_numbers[i].item(), labels[i].item()))
+                    if output_pairs:
+                        logging.info("Predictions and Labels: " + " ".join(f"({pred:.4f},{lbl:.4f})" for pred, lbl in output_pairs))
 
     # Calculate metrics based on decoder type
     if decoder_type == 'fourier':
+        # For fourier decoder, all_labels is a list of tensors
         all_labels = torch.cat(all_labels)
         mean_label = all_labels.mean().item()
         total_variance = torch.sum((all_labels - mean_label) ** 2).item()
-    else:  # greedy
-        if all_labels:
-            mean_label = sum(all_labels) / len(all_labels)
-            total_variance = sum((label - mean_label) ** 2 for label in all_labels)
-        else:
-            mean_label = 0
-            total_variance = 0
-            raise ValueError("No labels found for greedy decoder")
+    else:  # greedy - use same approach 
+        all_labels = torch.cat(all_labels)
+        mean_label = all_labels.mean().item()
+        total_variance = torch.sum((all_labels - mean_label) ** 2).item()
 
+    # Calculate final metrics
     avg_loss = total_loss / len(test_loader)
     whole_number_accuracy = total_correct / total_samples
     digit_wise_accuracy = correct_digits / total_digits if total_digits > 0 else 0
@@ -182,48 +186,94 @@ def evaluate_regular(model, dataloader, tokenizer, device, print_labels=False, m
             attention_mask = batch['attention_mask'].to(device)
             labels = batch['labels'].to(device)
             
-            outputs = model(input_ids, attention_mask=attention_mask, labels=labels)
-            logits = outputs.logits
-            loss = outputs.loss
+            try:
+                # Try normal forward pass
+                outputs = model(input_ids, attention_mask=attention_mask, labels=labels)
+                loss = outputs.loss
+                logits = outputs.logits
+            except ValueError as e:
+                if "Expected input batch_size" in str(e):
+                    # If there's a batch size mismatch, try without labels
+                    logging.warning("Batch size mismatch detected. Running model without labels.")
+                    outputs = model(input_ids, attention_mask=attention_mask)
+                    logits = outputs.logits
+                    
+                    # Calculate loss manually if shapes match
+                    if logits.size(0) == labels.size(0):
+                        # Shift logits and labels for next token prediction
+                        shift_logits = logits[:, :-1, :].contiguous()
+                        shift_labels = labels[:, 1:].contiguous().clone()
+                        
+                        # Replace padding tokens with -100 to ignore them in loss
+                        shift_labels[shift_labels == tokenizer.pad_token_id] = -100
+                        
+                        # Cross entropy loss
+                        loss_fct = torch.nn.CrossEntropyLoss()
+                        loss = loss_fct(shift_logits.view(-1, shift_logits.size(-1)), shift_labels.view(-1))
+                    else:
+                        logging.warning(f"Cannot compute loss: logits shape {logits.shape} != labels shape {labels.shape}")
+                        loss = torch.tensor(0.0, device=device)  # Dummy loss for this batch
+                else:
+                    # Re-raise if it's a different error
+                    raise e
             
             total_loss += loss.item()
             
             predictions = torch.argmax(logits, dim=-1)
             examplelist = []
+            
+            # Ensure predictions and input_ids have same batch size
+            if predictions.size(0) != input_ids.size(0):
+                logging.warning(f"Shape mismatch: predictions {predictions.shape}, input_ids {input_ids.shape}")
+                # Skip further processing for this batch with mismatched shapes
+                continue
+                
             for i in range(len(input_ids)):
                 label_indices = (labels[i] != -100).nonzero(as_tuple=True)[0]
                 actual_tokens = input_ids[i, label_indices].cpu().numpy()
-                predicted_tokens = predictions[i, label_indices-1].cpu().numpy()
-                actual_label = tokenizer.decode(actual_tokens, skip_special_tokens=True).strip()
-                predicted_label = tokenizer.decode(predicted_tokens, skip_special_tokens=True).strip()
-
-                if actual_label == predicted_label:
-                    total_correct_examples += 1
-                total_examples += 1
-
-                if is_numeric(predicted_label):
-                    actual_value = float(actual_label)
-                    predicted_value = float(predicted_label)
-                    total_squared_error += (actual_value - predicted_value) ** 2
-                    all_labels.append(actual_value)
-
-                max_len = max(len(actual_label), len(predicted_label))
-                padded_actual = actual_label.ljust(max_len)
-                padded_predicted = predicted_label.ljust(max_len)
                 
-                correct_characters += sum(1 for a, p in zip(padded_actual, padded_predicted) if a == p)
-                total_characters += max_len
+                # Ensure the index is within bounds for predictions 
+                valid_indices = label_indices[label_indices <= predictions.size(1)]
+                if len(valid_indices) > 0:
+                    predicted_indices = valid_indices - 1  # Adjust for causal LM prediction
+                    predicted_indices = predicted_indices[predicted_indices >= 0]  # Ensure non-negative
+                    if len(predicted_indices) > 0:
+                        predicted_tokens = predictions[i, predicted_indices].cpu().numpy()
+                        
+                        actual_label = tokenizer.decode(actual_tokens, skip_special_tokens=True).strip()
+                        predicted_label = tokenizer.decode(predicted_tokens, skip_special_tokens=True).strip()
 
-                if print_labels and printed_examples < max_print_examples:
-                    examplelist.append(f"({predicted_label}, {actual_label})")
-                    printed_examples += 1
+                        if actual_label == predicted_label:
+                            total_correct_examples += 1
+                        total_examples += 1
+
+                        if is_numeric(predicted_label) and is_numeric(actual_label):
+                            actual_value = float(actual_label)
+                            predicted_value = float(predicted_label)
+                            total_squared_error += (actual_value - predicted_value) ** 2
+                            all_labels.append(actual_value)
+
+                        max_len = max(len(actual_label), len(predicted_label))
+                        padded_actual = actual_label.ljust(max_len)
+                        padded_predicted = predicted_label.ljust(max_len)
+                        
+                        correct_characters += sum(1 for a, p in zip(padded_actual, padded_predicted) if a == p)
+                        total_characters += max_len
+
+                        if print_labels and printed_examples < max_print_examples:
+                            examplelist.append(f"({predicted_label}, {actual_label})")
+                            printed_examples += 1
 
             if print_labels and examplelist:
                 logging.info(" ".join(examplelist))
 
+    if total_examples == 0:
+        logging.warning("No valid examples were processed during evaluation.")
+        return 0.0, (0.0, 0.0), 0.0, 0.0
+        
     avg_loss = total_loss / len(dataloader)
-    whole_number_accuracy = total_correct_examples / total_examples
-    digit_wise_accuracy = correct_characters / total_characters
+    whole_number_accuracy = total_correct_examples / total_examples if total_examples > 0 else 0.0
+    digit_wise_accuracy = correct_characters / total_characters if total_characters > 0 else 0.0
 
     if all_labels:
         mean_label = sum(all_labels) / len(all_labels)

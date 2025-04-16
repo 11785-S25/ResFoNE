@@ -48,3 +48,7 @@ Thumbs.db
 *.rar
 *.7z
 project-private-*.zip 
+4_digits_mult/
+6_digits_add/
+result/
+wandb/

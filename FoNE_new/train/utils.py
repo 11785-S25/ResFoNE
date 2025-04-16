@@ -5,9 +5,22 @@ import logging
 
 def is_numeric(s):
     """
-    Check if a string represents a valid float.
+    Check if a string represents a valid numeric value.
+    Accepts integers, decimals, and scientific notation.
+    Allows for whitespace and handles negative numbers.
     """
-    return bool(re.match(r"^-?\d+(\.\d+)?$", s))
+    # First strip whitespace
+    s = s.strip()
+    
+    # Try to convert to float - most robust method
+    try:
+        float(s)
+        return True
+    except ValueError:
+        return False
+        
+    # Alternative regex approach (commented out)
+    # return bool(re.match(r"^\s*-?\d+(\.\d+)?([eE][-+]?\d+)?\s*$", s))
 
 def handle_nan_loss(batch, before_decoder, data_idx, model, save_path="debug_nan_loss.pt"):
     """

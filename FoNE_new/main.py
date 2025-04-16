@@ -22,16 +22,16 @@ def main():
         description="Training LLMs with custom embeddings and Fourier loss on TS datasets"
     )
     parser.add_argument('--batch_size', type=int, default=32, help='Batch size for training and testing')
-    parser.add_argument('--epochs', type=int, default=5, help='Number of epochs for training')
+    parser.add_argument('--epochs', type=int, default=100, help='Number of epochs for training')
     parser.add_argument('--int_digit_len', type=int, default=10, help='Number of digits for integer part')
     parser.add_argument('--frac_digit_len', type=int, default=0, help='Number of digits for fractional part')
     parser.add_argument('--len_gen_size', type=int, default=0, help='FNE: add k 0s after numbers to len gen')
     parser.add_argument('--lr', type=float, default=5e-5, help='Learning rate')
     parser.add_argument('--name', type=str, default='Euijin_test_', help='Log name')
     parser.add_argument('--model', type=str, default='gpt2', choices=['gpt2', 'llama', 'bert'], help='Model name')
-    parser.add_argument('--intermediate_network', type=str, default='identity', choices=['mlp', 'linear', 'identity'], help='Intermediate network type: mlp, linear, or identity (default)')
+    parser.add_argument('--intermediate_network', type=str, default='mlp', choices=['mlp', 'linear', 'identity'], help='Intermediate network type: mlp, linear, or identity (default)')
     parser.add_argument('--dataset', type=str, default='6_digits_add', help='Dataset name')
-    parser.add_argument('--train_from_scratch', default=True, action='store_true', help='Train the model from scratch without pre-trained weights')
+    parser.add_argument('--train_from_scratch', default=False, action='store_true', help='Train the model from scratch without pre-trained weights')
     parser.add_argument('--use_digit_wise_tokenizer', default=False, action='store_true', help='Whether to use digit-wise tokenizer')
     parser.add_argument('--num_train_samples', type=int, default=100000, help='Number of training samples to use')
     parser.add_argument('--num_test_samples', type=int, default=None, help='Number of test samples to use')
@@ -42,12 +42,12 @@ def main():
     parser.add_argument('--period_base_list', type=str, nargs='+', default=[10.0], help='List of period bases for Fourier embedding (e.g., 2, 5, 1/3)')
     parser.add_argument('--clip', default=True, action='store_true', help='Enable clipping')
     parser.add_argument('--not_add_linear', default=True, action='store_true', help='Do not add linear layer after FNE')
-    parser.add_argument('--decoder_type', type=str, default='fourier', choices=['fourier', 'greedy'], help='Decoder type: fourier or raw')
-    parser.add_argument('--adapter_type', type=str or None, default=None, choices=[None, 'linear', 'affine', 'low_rank'], help='Adapter type: None, linear, affine, or low_rank')
+    parser.add_argument('--decoder_type', type=str, default='greedy', choices=['fourier', 'greedy'], help='Decoder type: fourier or raw')
+    parser.add_argument('--adapter_type', type=str or None, default='affine', choices=[None, 'linear', 'affine', 'low_rank'], help='Adapter type: None, linear, affine, or low_rank')
     parser.add_argument('--rank', type=int, default=8, help='Rank for low-rank adapter')
     parser.add_argument('--scaling', type=float, default=1.0, help='Scaling factor for adapter, range from 0.0 to 1.0')
-    parser.add_argument('--add_parallel_adapters', default=False, action='store_true', help='Add parallel adapters to the model')
-    parser.add_argument('--freeze_model', default=False, action='store_true', help='Freeze the LLM model')
+    parser.add_argument('--add_parallel_adapters', default=True, action='store_true', help='Add parallel adapters to the model')
+    parser.add_argument('--freeze_model', default=True, action='store_true', help='Freeze the LLM model')
     
     args = parser.parse_args()
     
@@ -83,18 +83,23 @@ def main():
     # Load model and tokenizer with all necessary parameters
     model, tokenizer = load_model_and_tokenizer(
         model_name=args.model,
-        cache_dir="/home/zhuominc/ejhong/hg_cache", # replace with your own local path
+        cache_dir="", # replace with your own local path
         device=device,
         train_from_scratch=args.train_from_scratch,
         size_level=args.model_size_level,
         use_digit_wise_tokenizer=args.use_digit_wise_tokenizer
     )
 
+    if not args.train_from_scratch:
+        raw_model = model
+    else:
+        raw_model = None
+
     if args.add_parallel_adapters:
         model = load_model_with_parallel_adapters(model, args.model, adapter_type=args.adapter_type, rank=args.rank, scaling=args.scaling)
     
     # Run the training pipeline with all required arguments
-    create_dataloader_and_train(args, model, tokenizer, device)
+    create_dataloader_and_train(args, model, tokenizer, device, raw_model)
     
     wandb.finish()
 

@@ -1,7 +1,7 @@
-
 import torch
 import torch.nn as nn
 import types
+import weakref
 
 from models.adapter import ParallelAdapter
 
@@ -109,12 +109,15 @@ def add_parallel_adapters(
             if input_ids is None and len(args) > 0:
                 input_ids = args[0]
             
-            # Check if there are any non-zero values in the fourier_embeddings
-            has_fourier_embeddings = (fourier_embeddings != 0).any().item()
-
-            # If there are any non-zero values, set the adapter_embeddings to the fourier_embeddings
-            if has_fourier_embeddings:
-                self._adapter_embeddings = fourier_embeddings
+            # Check if fourier_embeddings exists and is a tensor
+            if fourier_embeddings is not None and isinstance(fourier_embeddings, torch.Tensor):
+                has_fourier_embeddings = (fourier_embeddings != 0).any()
+                if has_fourier_embeddings:
+                    self._adapter_embeddings = fourier_embeddings
+                else:
+                    self._adapter_embeddings = None
+            else:
+                self._adapter_embeddings = None
             
             # Call the original forward pass
             outputs = self.original_forward(*args, **kwargs)
@@ -145,16 +148,20 @@ def add_parallel_adapters(
                     out = outputs
                 
                 # Apply adapters using external embeddings
-                if hasattr(self.model) and self.model._adapter_embeddings is not None:
-                    if hasattr(self, "attn_adapter"):
-                        # Pass pre-computed embeddings to the adapter
-                        attn_adapter_output = self.attn_adapter(self.model._adapter_embeddings)
-                        out = out + attn_adapter_output
-                    
-                    if hasattr(self, "mlp_adapter"):
-                        # Pass pre-computed embeddings to the adapter
-                        mlp_adapter_output = self.mlp_adapter(self.model._adapter_embeddings)
-                        out = out + mlp_adapter_output
+                if hasattr(self, '_model_ref') and self._model_ref() is not None:
+                    model = self._model_ref()
+                    if hasattr(model, '_adapter_embeddings') and model._adapter_embeddings is not None:
+                        if hasattr(self, "attn_adapter"):
+                            # Ensure embeddings are on the same device as the adapter
+                            adapter_embeddings = model._adapter_embeddings.to(self.attn_adapter.adapter.weight.device if hasattr(self.attn_adapter, "adapter") else self.attn_adapter.down_proj.weight.device)
+                            attn_adapter_output = self.attn_adapter(adapter_embeddings)
+                            out = out + attn_adapter_output
+                        
+                        if hasattr(self, "mlp_adapter"):
+                            # Ensure embeddings are on the same device as the adapter
+                            adapter_embeddings = model._adapter_embeddings.to(self.mlp_adapter.adapter.weight.device if hasattr(self.mlp_adapter, "adapter") else self.mlp_adapter.down_proj.weight.device)
+                            mlp_adapter_output = self.mlp_adapter(adapter_embeddings)
+                            out = out + mlp_adapter_output
                 
                 # Update outputs
                 if isinstance(outputs, tuple):
@@ -169,7 +176,7 @@ def add_parallel_adapters(
                 return types.MethodType(new_block_forward, block)
             
             block.forward = make_forward(block)
-            block.model = model  # Reference to parent model
+            block._model_ref = weakref.ref(model)  # Use weak reference instead of direct reference
     
     # Freeze all parameters except adapters and adapter embedding
     for name, param in model.named_parameters():
@@ -223,14 +230,15 @@ def add_parallel_adapters_to_gpt2(
         def new_gpt2_forward(self, input_ids=None, fourier_embeddings=None, past_key_values=None, attention_mask=None, 
                            token_type_ids=None, position_ids=None, head_mask=None, 
                            inputs_embeds=None, use_cache=None, output_attentions=None, 
-                           output_hidden_states=None, return_dict=None):
+                           output_hidden_states=None, return_dict=None, labels=None, **kwargs):
 
-            # Check if there are any non-zero values in the fourier_embeddings
-            has_fourier_embeddings = (fourier_embeddings != 0).any().item()
-
-            # If there are any non-zero values, set the adapter_embeddings to the fourier_embeddings
-            if has_fourier_embeddings:
-                self._adapter_embeddings = fourier_embeddings
+            # Check if fourier_embeddings exists and is a tensor
+            if fourier_embeddings is not None and isinstance(fourier_embeddings, torch.Tensor):
+                has_fourier_embeddings = (fourier_embeddings != 0).any()
+                if has_fourier_embeddings:
+                    self._adapter_embeddings = fourier_embeddings
+                else:
+                    self._adapter_embeddings = None
             else:
                 self._adapter_embeddings = None
             
@@ -246,7 +254,9 @@ def add_parallel_adapters_to_gpt2(
                 use_cache=use_cache,
                 output_attentions=output_attentions,
                 output_hidden_states=output_hidden_states,
-                return_dict=return_dict
+                return_dict=return_dict,
+                labels=labels,
+                **kwargs
             )
         
         model.forward = types.MethodType(new_gpt2_forward, model)
@@ -274,9 +284,14 @@ def add_parallel_adapters_to_gpt2(
                 attn_output = attn_outputs[0]
                 
                 # Parallel adapter for attention using external embeddings
-                if hasattr(self.model, "_adapter_embeddings") and self.model._adapter_embeddings is not None:
-                    attn_adapter_output = self.attn_adapter(self.model._adapter_embeddings)
-                    attn_output = attn_output + attn_adapter_output
+                if hasattr(self, '_model_ref') and self._model_ref() is not None:
+                    model = self._model_ref()
+                    if hasattr(model, "_adapter_embeddings") and model._adapter_embeddings is not None:
+                        if hasattr(self, "attn_adapter"):
+                            # Ensure embeddings are on the same device as the adapter
+                            adapter_embeddings = model._adapter_embeddings.to(self.attn_adapter.adapter.weight.device if hasattr(self.attn_adapter, "adapter") else self.attn_adapter.down_proj.weight.device)
+                            attn_adapter_output = self.attn_adapter(adapter_embeddings)
+                            attn_output = attn_output + attn_adapter_output
                 
                 # Add residual connection
                 hidden_states = attn_output + residual
@@ -289,9 +304,14 @@ def add_parallel_adapters_to_gpt2(
                 mlp_output = self.mlp(hidden_states)
                 
                 # Parallel adapter for MLP using external embeddings
-                if hasattr(self.model, "_adapter_embeddings") and self.model._adapter_embeddings is not None:
-                    mlp_adapter_output = self.mlp_adapter(self.model._adapter_embeddings)
-                    mlp_output = mlp_output + mlp_adapter_output
+                if hasattr(self, '_model_ref') and self._model_ref() is not None:
+                    model = self._model_ref()
+                    if hasattr(model, "_adapter_embeddings") and model._adapter_embeddings is not None:
+                        if hasattr(self, "mlp_adapter"):
+                            # Ensure embeddings are on the same device as the adapter
+                            adapter_embeddings = model._adapter_embeddings.to(self.mlp_adapter.adapter.weight.device if hasattr(self.mlp_adapter, "adapter") else self.mlp_adapter.down_proj.weight.device)
+                            mlp_adapter_output = self.mlp_adapter(adapter_embeddings)
+                            mlp_output = mlp_output + mlp_adapter_output
                 
                 # Add residual connection
                 hidden_states = mlp_output + residual
@@ -310,7 +330,7 @@ def add_parallel_adapters_to_gpt2(
                 return types.MethodType(new_block_forward, block)
             
             block.forward = make_forward(block)
-            block.model = model  # Reference to parent model
+            block._model_ref = weakref.ref(model)  # Use weak reference instead of direct reference
     
     # Freeze all parameters except adapters and adapter embedding
     for name, param in model.named_parameters():
@@ -373,11 +393,11 @@ def add_parallel_adapters_to_llama(
         def new_llama_forward(self, input_ids=None, attention_mask=None, position_ids=None, 
                            past_key_values=None, inputs_embeds=None, use_cache=None,
                            output_attentions=None, output_hidden_states=None, return_dict=None,
-                           fourier_embeddings=None, **kwargs):
+                           fourier_embeddings=None, labels=None, **kwargs):
             
-            # Check if there are any non-zero values in the fourier_embeddings
-            if fourier_embeddings is not None:
-                has_fourier_embeddings = (fourier_embeddings != 0).any().item()
+            # Check if fourier_embeddings exists and is a tensor
+            if fourier_embeddings is not None and isinstance(fourier_embeddings, torch.Tensor):
+                has_fourier_embeddings = (fourier_embeddings != 0).any()
                 if has_fourier_embeddings:
                     self._adapter_embeddings = fourier_embeddings
                 else:
@@ -396,6 +416,7 @@ def add_parallel_adapters_to_llama(
                 output_attentions=output_attentions,
                 output_hidden_states=output_hidden_states,
                 return_dict=return_dict,
+                labels=labels,
                 **kwargs
             )
             
@@ -430,16 +451,20 @@ def add_parallel_adapters_to_llama(
                     out = outputs
                 
                 # Apply adapters using external embeddings
-                if hasattr(self.model, "_adapter_embeddings") and self.model._adapter_embeddings is not None:
-                    if hasattr(self, "attn_adapter"):
-                        # Pass pre-computed embeddings to the adapter
-                        attn_adapter_output = self.attn_adapter(self.model._adapter_embeddings)
-                        out = out + attn_adapter_output
-                    
-                    if hasattr(self, "mlp_adapter"):
-                        # Pass pre-computed embeddings to the adapter
-                        mlp_adapter_output = self.mlp_adapter(self.model._adapter_embeddings)
-                        out = out + mlp_adapter_output
+                if hasattr(self, '_model_ref') and self._model_ref() is not None:
+                    model = self._model_ref()
+                    if hasattr(model, "_adapter_embeddings") and model._adapter_embeddings is not None:
+                        if hasattr(self, "attn_adapter"):
+                            # Ensure embeddings are on the same device as the adapter
+                            adapter_embeddings = model._adapter_embeddings.to(self.attn_adapter.adapter.weight.device if hasattr(self.attn_adapter, "adapter") else self.attn_adapter.down_proj.weight.device)
+                            attn_adapter_output = self.attn_adapter(adapter_embeddings)
+                            out = out + attn_adapter_output
+                        
+                        if hasattr(self, "mlp_adapter"):
+                            # Ensure embeddings are on the same device as the adapter
+                            adapter_embeddings = model._adapter_embeddings.to(self.mlp_adapter.adapter.weight.device if hasattr(self.mlp_adapter, "adapter") else self.mlp_adapter.down_proj.weight.device)
+                            mlp_adapter_output = self.mlp_adapter(adapter_embeddings)
+                            out = out + mlp_adapter_output
                 
                 # Update outputs
                 if isinstance(outputs, tuple):
@@ -454,7 +479,7 @@ def add_parallel_adapters_to_llama(
                 return types.MethodType(new_block_forward, block)
             
             block.forward = make_forward(block)
-            block.model = model  # Reference to parent model
+            block._model_ref = weakref.ref(model)  # Use weak reference instead of direct reference
     
     # Freeze all parameters except adapters
     for name, param in model.named_parameters():
@@ -518,11 +543,11 @@ def add_parallel_adapters_to_bert(
                           position_ids=None, head_mask=None, inputs_embeds=None, 
                           encoder_hidden_states=None, encoder_attention_mask=None,
                           output_attentions=None, output_hidden_states=None, 
-                          return_dict=None, fourier_embeddings=None, **kwargs):
+                          return_dict=None, fourier_embeddings=None, labels=None, **kwargs):
             
-            # Check if there are any non-zero values in the fourier_embeddings
-            if fourier_embeddings is not None:
-                has_fourier_embeddings = (fourier_embeddings != 0).any().item()
+            # Check if fourier_embeddings exists and is a tensor
+            if fourier_embeddings is not None and isinstance(fourier_embeddings, torch.Tensor):
+                has_fourier_embeddings = (fourier_embeddings != 0).any()
                 if has_fourier_embeddings:
                     self._adapter_embeddings = fourier_embeddings
                 else:
@@ -543,6 +568,7 @@ def add_parallel_adapters_to_bert(
                 output_attentions=output_attentions,
                 output_hidden_states=output_hidden_states,
                 return_dict=return_dict,
+                labels=labels,
                 **kwargs
             )
             
@@ -577,16 +603,20 @@ def add_parallel_adapters_to_bert(
                     out = outputs
                 
                 # Apply adapters using external embeddings
-                if hasattr(self.model, "_adapter_embeddings") and self.model._adapter_embeddings is not None:
-                    if hasattr(self, "attn_adapter"):
-                        # Pass pre-computed embeddings to the adapter
-                        attn_adapter_output = self.attn_adapter(self.model._adapter_embeddings)
-                        out = out + attn_adapter_output
-                    
-                    if hasattr(self, "mlp_adapter"):
-                        # Pass pre-computed embeddings to the adapter
-                        mlp_adapter_output = self.mlp_adapter(self.model._adapter_embeddings)
-                        out = out + mlp_adapter_output
+                if hasattr(self, '_model_ref') and self._model_ref() is not None:
+                    model = self._model_ref()
+                    if hasattr(model, "_adapter_embeddings") and model._adapter_embeddings is not None:
+                        if hasattr(self, "attn_adapter"):
+                            # Ensure embeddings are on the same device as the adapter
+                            adapter_embeddings = model._adapter_embeddings.to(self.attn_adapter.adapter.weight.device if hasattr(self.attn_adapter, "adapter") else self.attn_adapter.down_proj.weight.device)
+                            attn_adapter_output = self.attn_adapter(adapter_embeddings)
+                            out = out + attn_adapter_output
+                        
+                        if hasattr(self, "mlp_adapter"):
+                            # Ensure embeddings are on the same device as the adapter
+                            adapter_embeddings = model._adapter_embeddings.to(self.mlp_adapter.adapter.weight.device if hasattr(self.mlp_adapter, "adapter") else self.mlp_adapter.down_proj.weight.device)
+                            mlp_adapter_output = self.mlp_adapter(adapter_embeddings)
+                            out = out + mlp_adapter_output
                 
                 # Update outputs
                 if isinstance(outputs, tuple):
@@ -601,7 +631,7 @@ def add_parallel_adapters_to_bert(
                 return types.MethodType(new_block_forward, block)
             
             block.forward = make_forward(block)
-            block.model = model  # Reference to parent model
+            block._model_ref = weakref.ref(model)  # Use weak reference instead of direct reference
     
     # Freeze all parameters except adapters
     for name, param in model.named_parameters():

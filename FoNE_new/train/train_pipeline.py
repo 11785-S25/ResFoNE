@@ -19,6 +19,7 @@ from train.eval import (
     evaluate_vanilla
 )
 from utils.data_utils import collate_fn
+from train.utils import is_numeric
 from number_encoders.FNE import FNE
 from number_encoders.RENE import RENE
 from number_encoders.XVAL import XVAL
@@ -125,10 +126,11 @@ def run_epoch(model, train_loader, test_loader, optimizer, scheduler, number_enc
         )
     elif args.method in ['fne', 'rene']:
         train_loss = train_fne(model, train_loader, number_encoder, intermediate_network, optimizer, scheduler, args,
-                               args.int_digit_len, args.frac_digit_len, args.len_gen_size, args.decoder_type, args.adapter_type, device)
+                               args.int_digit_len, args.frac_digit_len, args.len_gen_size, args.decoder_type, args.adapter_type, device,
+                               tokenizer=tokenizer if args.decoder_type == 'greedy' else None)
         test_loss, (whole_number_accuracy, digit_wise_accuracy), mse, r2 = evaluate_fne(
             model, test_loader, number_encoder, intermediate_network, args.int_digit_len, args.frac_digit_len, device,
-            print_labels=True, max_print=5, decoder_type=args.decoder_type, tokenizer=tokenizer
+            print_labels=True, max_print=5, decoder_type=args.decoder_type, tokenizer=tokenizer if args.decoder_type == 'greedy' else None
         )
     elif args.method == 'xval':
         train_loss = train_xval(model, train_loader, number_encoder, optimizer, scheduler, args, device)
@@ -210,7 +212,7 @@ def evaluate_model(model, test_loader, tokenizer, number_encoder, intermediate_n
 
 # --- Main DataLoader & Training Pipeline ---
 
-def create_dataloader_and_train(args, model, tokenizer, device):
+def create_dataloader_and_train(args, model, tokenizer, device, raw_model=None):
     """
     Prepares data loaders and executes the training and evaluation pipeline.
     """
@@ -275,6 +277,16 @@ def create_dataloader_and_train(args, model, tokenizer, device):
     elif args.method == 'xval':
         max_num = extract_max_num_from_dataset(args.dataset)
         number_encoder = XVAL(embedding_dim=embedding_dim, max_num=max_num, device=device).to(device)
+    
+    # If using pretrained weights, evaluate the raw base model first
+    if not args.train_from_scratch:
+        logging.info("Using pretrained weights - evaluating raw base model performance first...")
+        try:
+            evaluate_regular(raw_model, test_loader, tok, device, print_labels=True, max_print_examples=10)
+        except Exception as e:
+            logging.error(f"Error during raw model evaluation: {str(e)}")
+            logging.info("Continuing with training despite error in raw model evaluation")
+        logging.info('-' * 100)  # Separator for clarity in logs
     
     # If no training samples are specified, run evaluation only
     if args.num_train_samples == 0:
