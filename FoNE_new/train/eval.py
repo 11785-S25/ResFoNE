@@ -2,7 +2,7 @@ import torch
 import logging
 from .utils import is_numeric, get_regular_embeddings
 
-def evaluate_fne(model, test_loader, number_encoder, intermediate_network, int_digit_len, frac_digit_len, device, print_labels=False, max_print=10, decoder_type='fourier', tokenizer=None):
+def evaluate_fne(model, test_loader, number_encoder, intermediate_network, int_digit_len, frac_digit_len, device, print_labels=False, max_print=10, decoder_type=None, adapter_type=None, tokenizer=None):
     """
     Evaluation loop for Fourier Neural Embedding (FNE) based models.
     
@@ -40,37 +40,38 @@ def evaluate_fne(model, test_loader, number_encoder, intermediate_network, int_d
         number_encoder.compute_loss = types.MethodType(patched_compute_loss, number_encoder)
         number_encoder.compute_prediction = types.MethodType(patched_compute_prediction, number_encoder)
         
-        try:
-            # Run evaluation with patched encoder
-            return evaluate_vanilla(model, test_loader, number_encoder, intermediate_network, device, print_labels, max_print)
-        finally:
-            # Restore original methods
-            if number_encoder._original_compute_loss is not None:
-                number_encoder.compute_loss = number_encoder._original_compute_loss
-            else:
-                delattr(number_encoder, 'compute_loss')
+        # try:
+        #     # Run evaluation with patched encoder
+        #     # model, dataloader, tokenizer, device, print_labels=False, max_print_examples=10
+        #     return evaluate_regular(model, test_loader, tokenizer, device, print_labels, max_print, number_encoder, intermediate_network)
+        # finally:
+        #     # Restore original methods
+        #     if number_encoder._original_compute_loss is not None:
+        #         number_encoder.compute_loss = number_encoder._original_compute_loss
+        #     else:
+        #         delattr(number_encoder, 'compute_loss')
                 
-            if number_encoder._original_compute_prediction is not None:
-                number_encoder.compute_prediction = number_encoder._original_compute_prediction
-            else:
-                delattr(number_encoder, 'compute_prediction')
+        #     if number_encoder._original_compute_prediction is not None:
+        #         number_encoder.compute_prediction = number_encoder._original_compute_prediction
+        #     else:
+        #         delattr(number_encoder, 'compute_prediction')
                 
-            # Restore original attributes (or remove them if they didn't exist)
-            if number_encoder._original_frac_digit_len is not None:
-                number_encoder.frac_digit_len = number_encoder._original_frac_digit_len
-            else:
-                delattr(number_encoder, 'frac_digit_len')
+        #     # Restore original attributes (or remove them if they didn't exist)
+        #     if number_encoder._original_frac_digit_len is not None:
+        #         number_encoder.frac_digit_len = number_encoder._original_frac_digit_len
+        #     else:
+        #         delattr(number_encoder, 'frac_digit_len')
                 
-            if number_encoder._original_int_digit_len is not None:
-                number_encoder.int_digit_len = number_encoder._original_int_digit_len
-            else:
-                delattr(number_encoder, 'int_digit_len')
+        #     if number_encoder._original_int_digit_len is not None:
+        #         number_encoder.int_digit_len = number_encoder._original_int_digit_len
+        #     else:
+        #         delattr(number_encoder, 'int_digit_len')
                 
-            # Clean up temporary attributes
-            delattr(number_encoder, '_original_compute_loss')
-            delattr(number_encoder, '_original_compute_prediction')
-            delattr(number_encoder, '_original_frac_digit_len')
-            delattr(number_encoder, '_original_int_digit_len')
+        #     # Clean up temporary attributes
+        #     delattr(number_encoder, '_original_compute_loss')
+        #     delattr(number_encoder, '_original_compute_prediction')
+        #     delattr(number_encoder, '_original_frac_digit_len')
+        #     delattr(number_encoder, '_original_int_digit_len')
     
     logging.info('Evaluation start')
     model.eval()
@@ -106,36 +107,222 @@ def evaluate_fne(model, test_loader, number_encoder, intermediate_network, int_d
             input_embeddings = input_embeddings.to(model.dtype)
             attention_mask = attention_mask.to(model.dtype)     
 
-            outputs = model(inputs_embeds=input_embeddings, attention_mask=attention_mask, output_hidden_states=True)
-            before_decoder = outputs.hidden_states[-1]
-            last_token_hidden_state = (before_decoder * last_token_mask.unsqueeze(-1)).sum(dim=1)
             
-            predicted_numbers = number_encoder.fourier_compute_prediction(last_token_hidden_state, int_digit_len, frac_digit_len)
-            
-            all_labels.append(labels.cpu())
-            all_predictions.append(predicted_numbers.cpu())
-            
-            tolerance = 10 ** (-frac_digit_len)
-            correct_predictions = torch.abs(predicted_numbers - labels) < tolerance
-            total_correct += correct_predictions.sum().item()
-            total_samples += labels.size(0)
 
-            for i in range(labels.size(0)):
-                actual_value = str(labels[i].item())
-                predicted_value = str(predicted_numbers[i].item())
-                min_len = len(actual_value)
-                correct_digits += sum(1 for a, p in zip(actual_value[:min_len], predicted_value[:min_len]) if a == p)
-                total_digits += len(actual_value)
+            if decoder_type == 'fourier':
+                if adapter_type is None:
+                    outputs = model(inputs_embeds=input_embeddings, attention_mask=attention_mask, output_hidden_states=True)
+                elif adapter_type == 'linear' or adapter_type == 'affine' or adapter_type == 'low_rank':
+                    outputs = model(inputs_embeds=input_embeddings, attention_mask=attention_mask, output_hidden_states=True, fourier_embeddings=fourier_embeddings)
+                else:
+                    raise ValueError(f"Unsupported adapter type '{adapter_type}'.")
+                
+                before_decoder = outputs.hidden_states[-1]
+                last_token_hidden_state = (before_decoder * last_token_mask.unsqueeze(-1)).sum(dim=1)
+                
+                predicted_numbers = number_encoder.fourier_compute_prediction(last_token_hidden_state, int_digit_len, frac_digit_len)
+                
+                all_labels.append(labels.cpu())
+                all_predictions.append(predicted_numbers.cpu())
+                
+                # tolerance = 10 ** (-frac_digit_len)
+                # correct_predictions = torch.abs(predicted_numbers - labels) < tolerance
+                correct_predictions = torch.abs(predicted_numbers - labels) == 0
+                total_correct += correct_predictions.sum().item()
+                total_samples += labels.size(0)
 
-            for i in range(labels.size(0)):
-                if not correct_predictions[i]:
-                    mispredictions.append((predicted_numbers[i].item(), labels[i].item()))
+                for i in range(labels.size(0)):
+                    actual_value = str(labels[i].item())
+                    predicted_value = str(predicted_numbers[i].item())
+                    min_len = len(actual_value)
+                    correct_digits += sum(1 for a, p in zip(actual_value[:min_len], predicted_value[:min_len]) if a == p)
+                    total_digits += len(actual_value)
 
-            squared_error = torch.sum((predicted_numbers - labels) ** 2).item()
-            total_squared_error += squared_error
+                for i in range(labels.size(0)):
+                    if not correct_predictions[i]:
+                        mispredictions.append((predicted_numbers[i].item(), labels[i].item()))
 
-            loss = number_encoder.fourier_compute_loss(last_token_hidden_state, labels, int_digit_len, frac_digit_len)
-            total_loss += loss.item()
+                squared_error = torch.sum((predicted_numbers - labels) ** 2).item()
+                total_squared_error += squared_error
+
+                loss = number_encoder.fourier_compute_loss(last_token_hidden_state, labels, int_digit_len, frac_digit_len)
+                total_loss += loss.item()
+
+            elif decoder_type == 'greedy':
+                try:
+                    # if adapter_type is None:
+                    #     outputs = model(inputs_embeds=input_embeddings, attention_mask=attention_mask, output_hidden_states=True, labels=labels)
+                    # elif adapter_type == 'linear' or adapter_type == 'affine' or adapter_type == 'low_rank':
+                    #     outputs = model(inputs_embeds=input_embeddings, attention_mask=attention_mask, output_hidden_states=True, fourier_embeddings=fourier_embeddings, labels=labels)
+                    # else:
+                    #     raise ValueError(f"Unsupported adapter type '{adapter_type}'.")
+                    # logits = outputs.logits
+                    # loss = outputs.loss
+
+                    # if "Expected input batch_size" in str(e):
+                    if adapter_type is None:
+                        outputs = model(inputs_embeds=input_embeddings, attention_mask=attention_mask, output_hidden_states=True)
+                    elif adapter_type == 'linear' or adapter_type == 'affine' or adapter_type == 'low_rank':
+                        outputs = model(inputs_embeds=input_embeddings, attention_mask=attention_mask, output_hidden_states=True, fourier_embeddings=fourier_embeddings)
+                    else:
+                        raise ValueError(f"Unsupported adapter type '{adapter_type}'.")
+                    logits = outputs.logits
+                    all_labels.append(labels.cpu())
+                    
+                    # Calculate loss manually if shapes match
+                    if logits.size(0) == labels.size(0):
+                        # Check if labels is 2D (sequence model) or 1D (single value prediction)
+                        if labels.dim() > 1:
+                            # For sequence models - shift logits and labels for next token prediction
+                            shift_logits = logits[:, :-1, :].contiguous()
+                            shift_labels = labels[:, 1:].contiguous().clone()
+                            
+                            # Replace padding tokens with -100 to ignore them in loss
+                            shift_labels[shift_labels == tokenizer.pad_token_id] = -100
+                            
+                            # Cross entropy loss
+                            loss_fct = torch.nn.CrossEntropyLoss()
+                            loss = loss_fct(shift_logits.view(-1, shift_logits.size(-1)), shift_labels.view(-1))
+                        else:
+                            # For single value prediction (1D labels)
+                            # Tokenize the numeric labels for the greedy decoder case
+                            label_tokens = []
+                            for label in labels:
+                                # Convert numeric label to string
+                                label_str = str(label.item())
+                                # Tokenize the string label
+                                tokens = tokenizer(label_str, return_tensors="pt").input_ids
+                                # Remove special tokens if needed
+                                tokens = tokens[:, 1:-1] if tokens.size(1) > 2 else tokens  # Remove BOS/EOS if present
+                                label_tokens.append(tokens.squeeze(0))
+                            
+                            # Pad tokenized labels to same length
+                            max_len = max(t.size(0) for t in label_tokens)
+                            padded_label_tokens = []
+                            for tokens in label_tokens:
+                                if tokens.size(0) < max_len:
+                                    padding = torch.full((max_len - tokens.size(0),), tokenizer.pad_token_id, 
+                                                        dtype=tokens.dtype, device=tokens.device)
+                                    padded = torch.cat([tokens, padding])
+                                else:
+                                    padded = tokens
+                                padded_label_tokens.append(padded)
+                            
+                            # Stack to create batch
+                            tokenized_labels = torch.stack(padded_label_tokens).to(device)
+                            
+                            # Use last logits corresponding to the length of tokenized labels
+                            # and compute loss for each position in the tokenized labels
+                            batch_size = logits.size(0)
+                            loss = 0
+                            predictions = ""
+                            for i in range(batch_size):
+                                token_len = (tokenized_labels[i] != tokenizer.pad_token_id).sum().item()
+                                if token_len > 0:
+                                    # Use the last token_len positions of logits
+                                    relevant_logits = logits[i, -token_len:, :]
+                                    relevant_labels = tokenized_labels[i, :token_len]
+                                    loss_fct = torch.nn.CrossEntropyLoss()
+                                    loss += loss_fct(relevant_logits, relevant_labels)
+                                    predictions += tokenizer.decode(relevant_labels, skip_special_tokens=True)
+                                # all_predictions.append(float(predictions))
+                            # Average the loss over the batch
+                            loss = loss / batch_size
+                            
+                            # Calculate predictions from logits for accuracy metrics
+                            predicted_tokens = torch.argmax(logits, dim=-1)
+                            batch_predicted_numbers = []
+                            
+                            # Process each example in the batch
+                            for i in range(batch_size):
+                                # Get the valid (non-padding) tokens from the predicted sequence
+                                token_len = (tokenized_labels[i] != tokenizer.pad_token_id).sum().item()
+                                if token_len > 0:
+                                    # Use the last token_len positions of predictions
+                                    pred_tokens = predicted_tokens[i, -token_len:]
+                                    pred_str = tokenizer.decode(pred_tokens, skip_special_tokens=True)
+                                    
+                                    # Try to convert to float if possible
+                                    try:
+                                        pred_num = float(pred_str)
+                                        batch_predicted_numbers.append(pred_num)
+                                    except ValueError:
+                                        # If conversion fails, use NaN
+                                        batch_predicted_numbers.append(float('inf'))
+                                else:
+                                    batch_predicted_numbers.append(float('inf'))
+                            
+                            # Convert to tensor for calculations
+                            if batch_predicted_numbers:
+                                predicted_numbers = torch.tensor(batch_predicted_numbers, device=labels.device)
+                                all_predictions.append(predicted_numbers.cpu())
+                                
+                                # Exact match (for consistency with fourier decoder case)
+                                correct_predictions = torch.abs(predicted_numbers - labels) == 0
+                                total_correct += correct_predictions.sum().item()
+                                total_samples += labels.size(0)
+                    else:
+                        logging.warning(f"Cannot compute loss: logits shape {logits.shape} != labels shape {labels.shape}")
+                        loss = torch.tensor(0.0, device=device)  # Dummy loss for this batch
+                        raise ValueError("Cannot compute loss: logits shape != labels shape")
+                    # else:
+
+                except Exception as e:
+                    
+                        raise e
+                
+                total_loss += loss.item()
+                
+                predictions = torch.argmax(logits, dim=-1)
+                examplelist = []
+                
+                # Ensure predictions and input_ids have same batch size
+                if predictions.size(0) != input_ids.size(0):
+                    logging.warning(f"Shape mismatch: predictions {predictions.shape}, input_ids {input_ids.shape}")
+                    raise ValueError("Shape mismatch: predictions != input_ids")
+                    # Skip further processing for this batch with mismatched shapes
+                    continue
+                    
+                for i in range(len(input_ids)):
+                    label_indices = (labels[i] != -100).nonzero(as_tuple=True)[0]
+                    actual_tokens = input_ids[i, label_indices].cpu().numpy()
+                    
+                    # Ensure the index is within bounds for predictions 
+                    valid_indices = label_indices[label_indices <= predictions.size(1)]
+                    if len(valid_indices) > 0:
+                        predicted_indices = valid_indices - 1  # Adjust for causal LM prediction
+                        predicted_indices = predicted_indices[predicted_indices >= 0]  # Ensure non-negative
+                        if len(predicted_indices) > 0:
+                            predicted_tokens = predictions[i, predicted_indices].cpu().numpy()
+                            
+                            actual_label = tokenizer.decode(actual_tokens, skip_special_tokens=True).strip()
+                            predicted_label = tokenizer.decode(predicted_tokens, skip_special_tokens=True).strip()
+
+                            if actual_label == predicted_label:
+                                total_correct_examples += 1
+                            total_examples += 1
+
+                            if is_numeric(predicted_label) and is_numeric(actual_label):
+                                actual_value = float(actual_label)
+                                predicted_value = float(predicted_label)
+                                total_squared_error += (actual_value - predicted_value) ** 2
+                                all_labels.append(actual_value)
+
+                            max_len = max(len(actual_label), len(predicted_label))
+                            padded_actual = actual_label.ljust(max_len)
+                            padded_predicted = predicted_label.ljust(max_len)
+                            
+                            correct_characters += sum(1 for a, p in zip(padded_actual, padded_predicted) if a == p)
+                            total_characters += max_len
+
+                            max_print_examples = 10
+                            if print_labels and printed_examples < max_print_examples:
+                                examplelist.append(f"({predicted_label}, {actual_label})")
+                                printed_examples += 1
+
+                if print_labels and examplelist:
+                    logging.info(" ".join(examplelist))
+
 
     # Calculate metrics
     # For fourier decoder, all_labels is a list of tensors
@@ -162,7 +349,7 @@ def evaluate_fne(model, test_loader, number_encoder, intermediate_network, int_d
 
     return avg_loss, (whole_number_accuracy, digit_wise_accuracy), mse, r2
 
-def evaluate_regular(model, dataloader, tokenizer, device, print_labels=False, max_print_examples=10):
+def evaluate_regular(model, dataloader, tokenizer, device, print_labels=False, max_print_examples=10, number_encoder=None, intermediate_network=None):
     """
     Evaluation loop for regular models.
     """

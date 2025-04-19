@@ -41,37 +41,38 @@ def train_fne(model, train_loader, number_encoder, intermediate_network, optimiz
         number_encoder.compute_loss = types.MethodType(patched_compute_loss, number_encoder)
         number_encoder.compute_prediction = types.MethodType(patched_compute_prediction, number_encoder)
         
-        try:
-            # Run training with patched encoder
-            return train_vanilla(model, train_loader, number_encoder, intermediate_network, optimizer, scheduler, args, device)
-        finally:
-            # Restore original methods
-            if number_encoder._original_compute_loss is not None:
-                number_encoder.compute_loss = number_encoder._original_compute_loss
-            else:
-                delattr(number_encoder, 'compute_loss')
+        # try:
+        #     # Run training with patched encoder
+        #     # model, dataloader, optimizer, scheduler, device, args# 
+        #     return train_regular(model, train_loader, optimizer, scheduler, device, args, number_encoder, intermediate_network)
+        # finally:
+        #     # Restore original methods
+        #     if number_encoder._original_compute_loss is not None:
+        #         number_encoder.compute_loss = number_encoder._original_compute_loss
+        #     else:
+        #         delattr(number_encoder, 'compute_loss')
                 
-            if number_encoder._original_compute_prediction is not None:
-                number_encoder.compute_prediction = number_encoder._original_compute_prediction
-            else:
-                delattr(number_encoder, 'compute_prediction')
+        #     if number_encoder._original_compute_prediction is not None:
+        #         number_encoder.compute_prediction = number_encoder._original_compute_prediction
+        #     else:
+        #         delattr(number_encoder, 'compute_prediction')
                 
-            # Restore original attributes (or remove them if they didn't exist)
-            if number_encoder._original_frac_digit_len is not None:
-                number_encoder.frac_digit_len = number_encoder._original_frac_digit_len
-            else:
-                delattr(number_encoder, 'frac_digit_len')
+        #     # Restore original attributes (or remove them if they didn't exist)
+        #     if number_encoder._original_frac_digit_len is not None:
+        #         number_encoder.frac_digit_len = number_encoder._original_frac_digit_len
+        #     else:
+        #         delattr(number_encoder, 'frac_digit_len')
                 
-            if number_encoder._original_int_digit_len is not None:
-                number_encoder.int_digit_len = number_encoder._original_int_digit_len
-            else:
-                delattr(number_encoder, 'int_digit_len')
+        #     if number_encoder._original_int_digit_len is not None:
+        #         number_encoder.int_digit_len = number_encoder._original_int_digit_len
+        #     else:
+        #         delattr(number_encoder, 'int_digit_len')
                 
-            # Clean up temporary attributes
-            delattr(number_encoder, '_original_compute_loss')
-            delattr(number_encoder, '_original_compute_prediction')
-            delattr(number_encoder, '_original_frac_digit_len')
-            delattr(number_encoder, '_original_int_digit_len')
+        #     # Clean up temporary attributes
+        #     delattr(number_encoder, '_original_compute_loss')
+        #     delattr(number_encoder, '_original_compute_prediction')
+        #     delattr(number_encoder, '_original_frac_digit_len')
+        #     delattr(number_encoder, '_original_int_digit_len')
     
     # Ensure the tokenizer is provided when using greedy decoder
     if decoder_type == 'greedy' and tokenizer is None:
@@ -127,17 +128,81 @@ def train_fne(model, train_loader, number_encoder, intermediate_network, optimiz
             attention_mask = attention_mask.to(device=device, dtype=model.dtype)
             fourier_embeddings = fourier_embeddings.to(device=device, dtype=model.dtype)
             
-            # Forward pass through the model (now with gradients)
-            if adapter_type is None:
-                outputs = model(inputs_embeds=combined_embeddings, attention_mask=attention_mask, output_hidden_states=True)
-            elif adapter_type == 'linear' or adapter_type == 'affine' or adapter_type == 'low_rank':
-                outputs = model(inputs_embeds=combined_embeddings, attention_mask=attention_mask, output_hidden_states=True, fourier_embeddings=fourier_embeddings)
-            else:
-                raise ValueError(f"Unsupported adapter type '{adapter_type}'.")
             
-            before_decoder = outputs.hidden_states[-1]
-            last_token_hidden_state = (before_decoder * last_token_mask.unsqueeze(-1)).sum(dim=1)
-            loss = number_encoder.fourier_compute_loss(last_token_hidden_state, labels, int_digit_len, frac_digit_len, len_gen=len_gen)
+            
+            if decoder_type == 'fne':
+                # Forward pass through the model (now with gradients)
+                if adapter_type is None:
+                    outputs = model(inputs_embeds=combined_embeddings, attention_mask=attention_mask, output_hidden_states=True)
+                elif adapter_type == 'linear' or adapter_type == 'affine' or adapter_type == 'low_rank':
+                    outputs = model(inputs_embeds=combined_embeddings, attention_mask=attention_mask, output_hidden_states=True, fourier_embeddings=fourier_embeddings)
+                else:
+                    raise ValueError(f"Unsupported adapter type '{adapter_type}'.")
+                before_decoder = outputs.hidden_states[-1]
+                last_token_hidden_state = (before_decoder * last_token_mask.unsqueeze(-1)).sum(dim=1)
+                loss = number_encoder.fourier_compute_loss(last_token_hidden_state, labels, int_digit_len, frac_digit_len, len_gen=len_gen)
+            elif decoder_type == 'greedy':
+                # Forward pass through the model (now with gradients)
+                if adapter_type is None:
+                    # Convert numeric labels to tokenized labels for greedy decoder
+                    tokenized_labels = []
+                    for label in labels:
+                        # Convert numeric label to string
+                        label_str = str(label.item())
+                        # Tokenize the string label
+                        tokens = tokenizer(label_str, return_tensors="pt").input_ids.to(device)
+                        # Remove special tokens if needed
+                        tokens = tokens[:, 1:] if tokens.size(1) > 1 else tokens  # Keep EOS but remove BOS if present
+                        tokenized_labels.append(tokens.squeeze(0))
+                    
+                    # Pad tokenized labels to same length
+                    max_len = max(t.size(0) for t in tokenized_labels)
+                    padded_label_tokens = []
+                    for tokens in tokenized_labels:
+                        if tokens.size(0) < max_len:
+                            padding = torch.full((max_len - tokens.size(0),), -100,  # Use -100 to ignore in loss
+                                               dtype=tokens.dtype, device=tokens.device)
+                            padded = torch.cat([tokens, padding])
+                        else:
+                            padded = tokens
+                        padded_label_tokens.append(padded)
+                    
+                    # Stack to create batch
+                    token_labels = torch.stack(padded_label_tokens)
+                    
+                    # Run model with token labels instead of float labels
+                    outputs = model(inputs_embeds=combined_embeddings, attention_mask=attention_mask, 
+                                   output_hidden_states=True, labels=token_labels)
+                elif adapter_type == 'linear' or adapter_type == 'affine' or adapter_type == 'low_rank':
+                    # Same tokenization process for adapter models
+                    tokenized_labels = []
+                    for label in labels:
+                        label_str = str(label.item())
+                        tokens = tokenizer(label_str, return_tensors="pt").input_ids.to(device)
+                        tokens = tokens[:, 1:] if tokens.size(1) > 1 else tokens
+                        tokenized_labels.append(tokens.squeeze(0))
+                    
+                    max_len = max(t.size(0) for t in tokenized_labels)
+                    padded_label_tokens = []
+                    for tokens in tokenized_labels:
+                        if tokens.size(0) < max_len:
+                            padding = torch.full((max_len - tokens.size(0),), -100,
+                                               dtype=tokens.dtype, device=tokens.device)
+                            padded = torch.cat([tokens, padding])
+                        else:
+                            padded = tokens
+                        padded_label_tokens.append(padded)
+                    
+                    token_labels = torch.stack(padded_label_tokens)
+                    
+                    outputs = model(inputs_embeds=combined_embeddings, attention_mask=attention_mask, 
+                                  output_hidden_states=True, fourier_embeddings=fourier_embeddings, 
+                                  labels=token_labels)
+                else:
+                    raise ValueError(f"Unsupported adapter type '{adapter_type}'.")
+                loss = outputs.loss # for regular training
+            else:
+                raise ValueError(f"Unsupported decoder type '{decoder_type}'.")
 
             loss.backward()
             
@@ -162,7 +227,7 @@ def train_fne(model, train_loader, number_encoder, intermediate_network, optimiz
     logging.info(f"avg Loss: {total_loss / len(train_loader)}")
     return total_loss / len(train_loader)
 
-def train_regular(model, dataloader, optimizer, scheduler, device, args):
+def train_regular(model, dataloader, optimizer, scheduler, device, args, number_encoder=None, intermediate_network=None):
     """
     Regular training loop for models without additional embedding modules.
     """
