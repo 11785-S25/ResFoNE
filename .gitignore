@@ -52,3 +52,5 @@ project-private-*.zip
 6_digits_add/
 result/
 wandb/
+models--gpt2/
+.locks/
