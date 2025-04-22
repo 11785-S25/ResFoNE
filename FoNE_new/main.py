@@ -43,12 +43,12 @@ def main():
     parser.add_argument('--clip', default=True, action='store_true', help='Enable clipping')
     parser.add_argument('--not_add_linear', default=True, action='store_true', help='Do not add linear layer after FNE')
     parser.add_argument('--decoder_type', type=str, default='greedy', choices=['fourier', 'greedy'], help='Decoder type: fourier or raw')
-    parser.add_argument('--adapter_type', type=str or None, default='affine', choices=[None, 'linear', 'affine', 'low_rank'], help='Adapter type: None, linear, affine, or low_rank')
+    parser.add_argument('--adapter_type', type=str or None, default=None, choices=[None, 'linear', 'affine', 'low_rank'], help='Adapter type: None, linear, affine, or low_rank')
     parser.add_argument('--rank', type=int, default=8, help='Rank for low-rank adapter')
     parser.add_argument('--scaling', type=float, default=1.0, help='Scaling factor for adapter, range from 0.0 to 1.0')
     parser.add_argument('--add_parallel_adapters', default=True, action='store_true', help='Add parallel adapters to the model')
     parser.add_argument('--freeze_model', default=True, action='store_true', help='Freeze the LLM model')
-    
+    parser.add_argument('--debug', default=False, action='store_true', help='Debug mode')
     args = parser.parse_args()
     
     # Convert period_base_list strings to floats (handling fractions)
@@ -63,7 +63,8 @@ def main():
         torch.cuda.manual_seed_all(args.seed)
     
     wandb.init(
-        project="FoNE_TS",
+        project="ablations_6dititsadd",
+        entity="11785_fone_project",
         config=vars(args),
         name=run_name
     )

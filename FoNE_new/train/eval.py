@@ -86,6 +86,7 @@ def evaluate_fne(model, test_loader, number_encoder, intermediate_network, int_d
     all_labels = []
     all_predictions = []
     mispredictions = []
+    printed_examples = 0  # Initialize counter for printed examples
 
     if decoder_type == 'greedy' and tokenizer is None:
         raise ValueError("Tokenizer is required when decoder_type is 'greedy'")
@@ -150,16 +151,6 @@ def evaluate_fne(model, test_loader, number_encoder, intermediate_network, int_d
 
             elif decoder_type == 'greedy':
                 try:
-                    # if adapter_type is None:
-                    #     outputs = model(inputs_embeds=input_embeddings, attention_mask=attention_mask, output_hidden_states=True, labels=labels)
-                    # elif adapter_type == 'linear' or adapter_type == 'affine' or adapter_type == 'low_rank':
-                    #     outputs = model(inputs_embeds=input_embeddings, attention_mask=attention_mask, output_hidden_states=True, fourier_embeddings=fourier_embeddings, labels=labels)
-                    # else:
-                    #     raise ValueError(f"Unsupported adapter type '{adapter_type}'.")
-                    # logits = outputs.logits
-                    # loss = outputs.loss
-
-                    # if "Expected input batch_size" in str(e):
                     if adapter_type is None:
                         outputs = model(inputs_embeds=input_embeddings, attention_mask=attention_mask, output_hidden_states=True)
                     elif adapter_type == 'linear' or adapter_type == 'affine' or adapter_type == 'low_rank':
@@ -169,159 +160,157 @@ def evaluate_fne(model, test_loader, number_encoder, intermediate_network, int_d
                     logits = outputs.logits
                     all_labels.append(labels.cpu())
                     
-                    # Calculate loss manually if shapes match
-                    if logits.size(0) == labels.size(0):
-                        # Check if labels is 2D (sequence model) or 1D (single value prediction)
-                        if labels.dim() > 1:
-                            # For sequence models - shift logits and labels for next token prediction
-                            shift_logits = logits[:, :-1, :].contiguous()
-                            shift_labels = labels[:, 1:].contiguous().clone()
-                            
-                            # Replace padding tokens with -100 to ignore them in loss
-                            shift_labels[shift_labels == tokenizer.pad_token_id] = -100
-                            
-                            # Cross entropy loss
-                            loss_fct = torch.nn.CrossEntropyLoss()
-                            loss = loss_fct(shift_logits.view(-1, shift_logits.size(-1)), shift_labels.view(-1))
-                        else:
-                            # For single value prediction (1D labels)
-                            # Tokenize the numeric labels for the greedy decoder case
-                            label_tokens = []
-                            for label in labels:
-                                # Convert numeric label to string
-                                label_str = str(label.item())
-                                # Tokenize the string label
-                                tokens = tokenizer(label_str, return_tensors="pt").input_ids
-                                # Remove special tokens if needed
-                                tokens = tokens[:, 1:-1] if tokens.size(1) > 2 else tokens  # Remove BOS/EOS if present
-                                label_tokens.append(tokens.squeeze(0))
-                            
-                            # Pad tokenized labels to same length
-                            max_len = max(t.size(0) for t in label_tokens)
-                            padded_label_tokens = []
-                            for tokens in label_tokens:
-                                if tokens.size(0) < max_len:
-                                    padding = torch.full((max_len - tokens.size(0),), tokenizer.pad_token_id, 
-                                                        dtype=tokens.dtype, device=tokens.device)
-                                    padded = torch.cat([tokens, padding])
-                                else:
-                                    padded = tokens
-                                padded_label_tokens.append(padded)
-                            
-                            # Stack to create batch
-                            tokenized_labels = torch.stack(padded_label_tokens).to(device)
-                            
-                            # Use last logits corresponding to the length of tokenized labels
-                            # and compute loss for each position in the tokenized labels
-                            batch_size = logits.size(0)
-                            loss = 0
-                            predictions = ""
-                            for i in range(batch_size):
-                                token_len = (tokenized_labels[i] != tokenizer.pad_token_id).sum().item()
-                                if token_len > 0:
-                                    # Use the last token_len positions of logits
-                                    relevant_logits = logits[i, -token_len:, :]
-                                    relevant_labels = tokenized_labels[i, :token_len]
-                                    loss_fct = torch.nn.CrossEntropyLoss()
-                                    loss += loss_fct(relevant_logits, relevant_labels)
-                                    predictions += tokenizer.decode(relevant_labels, skip_special_tokens=True)
-                                # all_predictions.append(float(predictions))
-                            # Average the loss over the batch
-                            loss = loss / batch_size
-                            
-                            # Calculate predictions from logits for accuracy metrics
-                            predicted_tokens = torch.argmax(logits, dim=-1)
-                            batch_predicted_numbers = []
-                            
-                            # Process each example in the batch
-                            for i in range(batch_size):
-                                # Get the valid (non-padding) tokens from the predicted sequence
-                                token_len = (tokenized_labels[i] != tokenizer.pad_token_id).sum().item()
-                                if token_len > 0:
-                                    # Use the last token_len positions of predictions
-                                    pred_tokens = predicted_tokens[i, -token_len:]
-                                    pred_str = tokenizer.decode(pred_tokens, skip_special_tokens=True)
-                                    
-                                    # Try to convert to float if possible
-                                    try:
-                                        pred_num = float(pred_str)
-                                        batch_predicted_numbers.append(pred_num)
-                                    except ValueError:
-                                        # If conversion fails, use NaN
-                                        batch_predicted_numbers.append(float('inf'))
-                                else:
-                                    batch_predicted_numbers.append(float('inf'))
-                            
-                            # Convert to tensor for calculations
-                            if batch_predicted_numbers:
-                                predicted_numbers = torch.tensor(batch_predicted_numbers, device=labels.device)
-                                all_predictions.append(predicted_numbers.cpu())
-                                
-                                # Exact match (for consistency with fourier decoder case)
-                                correct_predictions = torch.abs(predicted_numbers - labels) == 0
-                                total_correct += correct_predictions.sum().item()
-                                total_samples += labels.size(0)
-                    else:
-                        logging.warning(f"Cannot compute loss: logits shape {logits.shape} != labels shape {labels.shape}")
-                        loss = torch.tensor(0.0, device=device)  # Dummy loss for this batch
-                        raise ValueError("Cannot compute loss: logits shape != labels shape")
-                    # else:
-
-                except Exception as e:
+                    # Tokenize labels for evaluation
+                    tokenized_labels = []
+                    for label in labels:
+                        # Convert numeric label to string with leading space for consistency with training
+                        label_str = " " + str(label.item())
+                        tokens = tokenizer(label_str, return_tensors="pt").input_ids.to(device)
+                        # Handle special tokens
+                        if tokens.size(1) > 2:
+                            tokens = tokens[:, 1:-1]  # Remove both BOS and EOS if present
+                        elif tokens.size(1) > 1:
+                            tokens = tokens[:, 1:]    # Remove just BOS if that's all we have
+                        tokenized_labels.append(tokens.squeeze(0))
                     
-                        raise e
+                    # Pad tokenized labels to same length
+                    max_len = max(t.size(0) for t in tokenized_labels)
+                    padded_label_tokens = []
+                    for tokens in tokenized_labels:
+                        if tokens.size(0) < max_len:
+                            padding = torch.full((max_len - tokens.size(0),), -100,
+                                              dtype=tokens.dtype, device=tokens.device)
+                            padded = torch.cat([tokens, padding])
+                        else:
+                            padded = tokens
+                        padded_label_tokens.append(padded)
+                    
+                    # Stack to create batch
+                    token_labels = torch.stack(padded_label_tokens)
+                    
+                    # Align labels with input positions, similar to train_fne
+                    batch_size = input_ids.size(0)
+                    seq_len = input_ids.size(1)
+                    shifted_labels = torch.full((batch_size, seq_len), -100, dtype=torch.long, device=device)
+                    
+                    # Position the labels at the end of each sequence, matching training logic
+                    for i in range(batch_size):
+                        # Find the position of the last non-padding token in the sequence
+                        last_pos = (input_ids[i] != tokenizer.pad_token_id).nonzero()[-1].item()
+                        
+                        # Calculate where to put label tokens (similar to train_fne)
+                        label_start_pos = last_pos - token_labels[i].size(0) + 1
+                        
+                        # Ensure we don't go out of bounds
+                        if label_start_pos < 0:
+                            label_start_pos = 0
+                        
+                        # Place the tokens at the right position
+                        label_length = token_labels[i].size(0)
+                        shifted_labels[i, label_start_pos:label_start_pos+label_length] = token_labels[i]
+                    
+                    # Calculate loss and predictions
+                    loss_fct = torch.nn.CrossEntropyLoss(ignore_index=-100)
+                    logits_reshaped = logits.view(-1, logits.size(-1))
+                    labels_reshaped = shifted_labels.view(-1)
+                    loss = loss_fct(logits_reshaped, labels_reshaped)
+                    total_loss += loss.item()
+                    
+                    # Get token predictions
+                    token_preds = torch.argmax(logits, dim=-1)
+                    batch_predicted_numbers = []
+                    
+                    # Process each example in the batch for evaluation metrics
+                    for i in range(batch_size):
+                        # Get the positions where labels should be (non -100 values)
+                        label_positions = (shifted_labels[i] != -100).nonzero().squeeze(-1)
+                        
+                        if label_positions.size(0) > 0:
+                            # Get predicted tokens at these positions
+                            pred_tokens = token_preds[i].index_select(0, label_positions)
+                            # Decode to text
+                            pred_str = tokenizer.decode(pred_tokens, skip_special_tokens=True).strip()
+                            
+                            # Try to convert to float
+                            try:
+                                pred_num = float(pred_str)
+                                batch_predicted_numbers.append(pred_num)
+                                
+                                # Calculate digit-wise accuracy
+                                actual_value = str(labels[i].item())
+                                predicted_value = str(pred_num)
+                                
+                                # Compare digits for accuracy
+                                min_len = min(len(actual_value), len(predicted_value))
+                                for a, p in zip(actual_value[:min_len], predicted_value[:min_len]):
+                                    if a == p:
+                                        correct_digits += 1
+                                total_digits += max(len(actual_value), len(predicted_value))
+                                
+                                # Track mispredictions
+                                if abs(pred_num - labels[i].item()) != 0:
+                                    mispredictions.append((pred_num, labels[i].item()))
+                                
+                                # Add to squared error
+                                squared_error = (pred_num - labels[i].item()) ** 2
+                                total_squared_error += squared_error
+                                
+                                # Count whole number matches
+                                if abs(pred_num - labels[i].item()) == 0:
+                                    total_correct += 1
+                                total_samples += 1
+                                
+                                # Print sample predictions if requested
+                                if print_labels and printed_examples < max_print:
+                                    logging.info(f"Input: {tokenizer.decode(input_ids[i])}")
+                                    logging.info(f"True: {labels[i].item()}, Predicted: {pred_num}")
+                                    logging.info(f"Predicted tokens: {pred_tokens.tolist()}")
+                                    logging.info("---")
+                                    printed_examples += 1
+                                
+                            except ValueError:
+                                # If conversion to float fails, count as error
+                                batch_predicted_numbers.append(float('nan'))
+                                total_samples += 1  # Still count in denominator
+                                
+                                if print_labels and printed_examples < max_print:
+                                    logging.info(f"Input: {tokenizer.decode(input_ids[i])}")
+                                    logging.info(f"True: {labels[i].item()}, Failed to parse prediction: '{pred_str}'")
+                                    logging.info("---")
+                                    printed_examples += 1
+                        else:
+                            # No label positions found
+                            batch_predicted_numbers.append(float('nan'))
+                            total_samples += 1  # Still count in denominator
+                    
+                    # Convert predictions to tensor and add to all_predictions
+                    if batch_predicted_numbers:
+                        predicted_numbers = torch.tensor(batch_predicted_numbers, device=device)
+                        all_predictions.append(predicted_numbers.cpu())
+                
+                except Exception as e:
+                    raise e
                 
                 total_loss += loss.item()
                 
-                predictions = torch.argmax(logits, dim=-1)
-                examplelist = []
-                
-                # Ensure predictions and input_ids have same batch size
-                if predictions.size(0) != input_ids.size(0):
-                    logging.warning(f"Shape mismatch: predictions {predictions.shape}, input_ids {input_ids.shape}")
-                    raise ValueError("Shape mismatch: predictions != input_ids")
-                    # Skip further processing for this batch with mismatched shapes
-                    continue
-                    
-                for i in range(len(input_ids)):
-                    label_indices = (labels[i] != -100).nonzero(as_tuple=True)[0]
-                    actual_tokens = input_ids[i, label_indices].cpu().numpy()
-                    
-                    # Ensure the index is within bounds for predictions 
-                    valid_indices = label_indices[label_indices <= predictions.size(1)]
-                    if len(valid_indices) > 0:
-                        predicted_indices = valid_indices - 1  # Adjust for causal LM prediction
-                        predicted_indices = predicted_indices[predicted_indices >= 0]  # Ensure non-negative
-                        if len(predicted_indices) > 0:
-                            predicted_tokens = predictions[i, predicted_indices].cpu().numpy()
-                            
-                            actual_label = tokenizer.decode(actual_tokens, skip_special_tokens=True).strip()
-                            predicted_label = tokenizer.decode(predicted_tokens, skip_special_tokens=True).strip()
-
-                            if actual_label == predicted_label:
-                                total_correct_examples += 1
-                            total_examples += 1
-
-                            if is_numeric(predicted_label) and is_numeric(actual_label):
-                                actual_value = float(actual_label)
-                                predicted_value = float(predicted_label)
-                                total_squared_error += (actual_value - predicted_value) ** 2
-                                all_labels.append(actual_value)
-
-                            max_len = max(len(actual_label), len(predicted_label))
-                            padded_actual = actual_label.ljust(max_len)
-                            padded_predicted = predicted_label.ljust(max_len)
-                            
-                            correct_characters += sum(1 for a, p in zip(padded_actual, padded_predicted) if a == p)
-                            total_characters += max_len
-
-                            max_print_examples = 10
-                            if print_labels and printed_examples < max_print_examples:
-                                examplelist.append(f"({predicted_label}, {actual_label})")
+                # Remove redundant second loop - use the metrics we already calculated above
+                if print_labels:
+                    examplelist = []
+                    for i in range(min(batch_size, max_print - printed_examples)):
+                        if printed_examples >= max_print:
+                            break
+                        
+                        if i < len(batch_predicted_numbers):
+                            try:
+                                predicted_val = batch_predicted_numbers[i]
+                                actual_val = labels[i].item()
+                                examplelist.append(f"({predicted_val}, {actual_val})")
                                 printed_examples += 1
-
-                if print_labels and examplelist:
-                    logging.info(" ".join(examplelist))
+                            except:
+                                continue
+                    
+                    if examplelist:
+                        logging.info(" ".join(examplelist))
 
 
     # Calculate metrics

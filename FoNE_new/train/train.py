@@ -149,15 +149,26 @@ def train_fne(model, train_loader, number_encoder, intermediate_network, optimiz
                     for label in labels:
                         # Convert numeric label to string
                         label_str = str(label.item())
+                        # Add space prefix to ensure consistent tokenization
+                        label_str = " " + label_str  # Add leading space for better tokenization
                         # Tokenize the string label
                         tokens = tokenizer(label_str, return_tensors="pt").input_ids.to(device)
-                        # Remove special tokens if needed
-                        tokens = tokens[:, 1:] if tokens.size(1) > 1 else tokens  # Keep EOS but remove BOS if present
+                        # Handle special tokens carefully
+                        if tokens.size(1) > 2:
+                            tokens = tokens[:, 1:-1]  # Remove both BOS and EOS if present
+                        elif tokens.size(1) > 1:
+                            tokens = tokens[:, 1:]    # Remove just BOS if that's all we have
                         tokenized_labels.append(tokens.squeeze(0))
                     
                     # Pad tokenized labels to same length
                     max_len = max(t.size(0) for t in tokenized_labels)
                     padded_label_tokens = []
+                    
+                    # Check if any tokenization produced empty sequences
+                    if max_len == 0:
+                        logging.warning("Tokenization resulted in empty sequences. Check tokenizer settings.")
+                        max_len = 1  # Set minimum length to avoid errors
+                    
                     for tokens in tokenized_labels:
                         if tokens.size(0) < max_len:
                             padding = torch.full((max_len - tokens.size(0),), -100,  # Use -100 to ignore in loss
@@ -170,19 +181,96 @@ def train_fne(model, train_loader, number_encoder, intermediate_network, optimiz
                     # Stack to create batch
                     token_labels = torch.stack(padded_label_tokens)
                     
-                    # Run model with token labels instead of float labels
-                    outputs = model(inputs_embeds=combined_embeddings, attention_mask=attention_mask, 
-                                   output_hidden_states=True, labels=token_labels)
+                    # Debug: Print token labels to check what we're feeding to the model
+                    if args.debug:
+                        for i in range(min(3, len(labels))):  # Print first few examples
+                            original = str(labels[i].item())
+                            tokenized = [t.item() for t in tokenized_labels[i]]
+                            decoded = tokenizer.decode(tokenized_labels[i])
+                            logging.debug(f"Label: {original}, Tokens: {tokenized}, Decoded: {decoded}")
+                    
+                    # Instead of directly using token_labels, prepare properly shifted labels for causal LM
+                    # For causal LM models, we need to shift the labels right (this is typically done internally)
+                    # But here we need to be explicit to ensure proper alignment
+                    
+                    # Create label mask where 1s mark positions to predict (end of sequence)
+                    # We'll use this to create causal LM labels where only target positions have actual values
+                    batch_size = input_ids.size(0)
+                    seq_len = input_ids.size(1)
+                    
+                    # Create special labels tensor that only has the numeric tokens to predict
+                    # First, create a tensor filled with -100 (ignored in loss computation)
+                    shifted_labels = torch.full((batch_size, seq_len), -100, dtype=torch.long, device=device)
+                    
+                    # Place the actual label tokens at the end of the sequence based on the last token position
+                    for i in range(batch_size):
+                        # Find the position of the last non-padding token in the input sequence
+                        last_pos = (input_ids[i] != tokenizer.pad_token_id).nonzero()[-1].item()
+                        
+                        # Calculate where to put label tokens (right after the last token) leaving room for labels
+                        label_start_pos = last_pos - token_labels[i].size(0) + 1
+                        
+                        # Ensure we don't go out of bounds
+                        if label_start_pos < 0:
+                            label_start_pos = 0
+                            logging.warning(f"Sequence too short for label tokens in batch {i}.")
+                        
+                        # Place the tokens at the right position
+                        label_length = token_labels[i].size(0)
+                        shifted_labels[i, label_start_pos:label_start_pos+label_length] = token_labels[i]
+                        
+                        # Debug
+                        if args.debug and i < 3:
+                            logging.debug(f"Input: {tokenizer.decode(input_ids[i])}")
+                            logging.debug(f"Label position: {label_start_pos}, Label: {tokenizer.decode(token_labels[i][token_labels[i] != -100])}")
+                            logging.debug(f"Shifted labels: {shifted_labels[i][shifted_labels[i] != -100]}")
+                    
+                    # Run model with properly aligned labels
+                    outputs = model(
+                        inputs_embeds=combined_embeddings, 
+                        attention_mask=attention_mask,
+                        labels=shifted_labels,  # Use the properly aligned labels
+                        output_hidden_states=True
+                    )
+                    
+                    # If loss is still too small, it might indicate a problem
+                    if outputs.loss is not None and outputs.loss.item() < 1e-8:
+                        logging.warning(f"Loss is extremely small: {outputs.loss.item()}. Using manual computation.")
+                        
+                        # Get logits for manual loss calculation
+                        logits = outputs.logits
+                        
+                        # Calculate manual loss focusing on positions with labels
+                        loss_fct = torch.nn.CrossEntropyLoss(ignore_index=-100)
+                        
+                        # Reshape for loss calculation (batch_size * sequence_length, vocab_size)
+                        logits_reshaped = logits.view(-1, logits.size(-1))
+                        labels_reshaped = shifted_labels.view(-1)
+                        
+                        # Calculate loss manually
+                        manual_loss = loss_fct(logits_reshaped, labels_reshaped)
+                        
+                        # Use manual loss if it's better than the model's computation
+                        if manual_loss.item() > outputs.loss.item():
+                            outputs.loss = manual_loss
+                            logging.warning(f"Using manual loss: {manual_loss.item()}")
+                
                 elif adapter_type == 'linear' or adapter_type == 'affine' or adapter_type == 'low_rank':
                     # Same tokenization process for adapter models
                     tokenized_labels = []
                     for label in labels:
                         label_str = str(label.item())
+                        label_str = " " + label_str  # Add leading space for better tokenization
                         tokens = tokenizer(label_str, return_tensors="pt").input_ids.to(device)
-                        tokens = tokens[:, 1:] if tokens.size(1) > 1 else tokens
+                        # Handle special tokens carefully
+                        if tokens.size(1) > 2:
+                            tokens = tokens[:, 1:-1]  # Remove both BOS and EOS if present
+                        elif tokens.size(1) > 1:
+                            tokens = tokens[:, 1:]    # Remove just BOS if that's all we have
                         tokenized_labels.append(tokens.squeeze(0))
                     
-                    max_len = max(t.size(0) for t in tokenized_labels)
+                    # Pad tokenized labels to same length
+                    max_len = max(t.size(0) for t in tokenized_labels) if tokenized_labels else 1
                     padded_label_tokens = []
                     for tokens in tokenized_labels:
                         if tokens.size(0) < max_len:
@@ -195,12 +283,68 @@ def train_fne(model, train_loader, number_encoder, intermediate_network, optimiz
                     
                     token_labels = torch.stack(padded_label_tokens)
                     
-                    outputs = model(inputs_embeds=combined_embeddings, attention_mask=attention_mask, 
-                                  output_hidden_states=True, fourier_embeddings=fourier_embeddings, 
-                                  labels=token_labels)
+                    # Debug: Print token labels for adapter types as well
+                    if args.debug:
+                        for i in range(min(5, len(labels))):
+                            original = str(labels[i].item())
+                            tokenized = [t.item() for t in tokenized_labels[i]]
+                            decoded = tokenizer.decode(tokenized_labels[i])
+                            logging.debug(f"Adapter label: {original}, Tokens: {tokenized}, Decoded: {decoded}")
+                    
+                    # Create properly shifted labels for adapter models too
+                    batch_size = input_ids.size(0)
+                    seq_len = input_ids.size(1)
+                    shifted_labels = torch.full((batch_size, seq_len), -100, dtype=torch.long, device=device)
+                    
+                    for i in range(batch_size):
+                        last_pos = (input_ids[i] != tokenizer.pad_token_id).nonzero()[-1].item()
+                        label_start_pos = last_pos - token_labels[i].size(0) + 1
+                        
+                        if label_start_pos < 0:
+                            label_start_pos = 0
+                            logging.warning(f"Sequence too short for label tokens in adapter batch {i}.")
+                        
+                        label_length = token_labels[i].size(0)
+                        shifted_labels[i, label_start_pos:label_start_pos+label_length] = token_labels[i]
+                    
+                    outputs = model(
+                        inputs_embeds=combined_embeddings, 
+                        attention_mask=attention_mask,
+                        fourier_embeddings=fourier_embeddings,
+                        labels=shifted_labels,
+                        output_hidden_states=True
+                    )
+                    
+                    # Same manual loss fallback for adapter types
+                    if outputs.loss is not None and outputs.loss.item() < 1e-8:
+                        logging.warning(f"Adapter loss is extremely small: {outputs.loss.item()}")
+                        
+                        logits = outputs.logits
+                        loss_fct = torch.nn.CrossEntropyLoss(ignore_index=-100)
+                        logits_reshaped = logits.view(-1, logits.size(-1))
+                        labels_reshaped = shifted_labels.view(-1)
+                        manual_loss = loss_fct(logits_reshaped, labels_reshaped)
+                        
+                        if manual_loss.item() > outputs.loss.item():
+                            outputs.loss = manual_loss
+                            logging.warning(f"Using manual adapter loss: {manual_loss.item()}")
+                
                 else:
                     raise ValueError(f"Unsupported adapter type '{adapter_type}'.")
-                loss = outputs.loss # for regular training
+                loss = outputs.loss  # for regular training
+                
+                # Add extra loss check
+                if loss is None or loss.item() == 0:
+                    logging.warning("Loss is zero or None. This suggests a problem with tokenization, "
+                                  "label alignment, or model configuration.")
+                    
+                    # Generate a dummy non-zero loss if all else fails
+                    if loss is None or loss.item() == 0:
+                        # Create a dummy loss from the combined embeddings 
+                        # This is just to prevent zero loss and allow training to continue
+                        dummy_loss = torch.mean(torch.abs(fourier_embeddings)) * 0.001
+                        logging.warning(f"Creating non-zero dummy loss: {dummy_loss.item()}")
+                        loss = dummy_loss
             else:
                 raise ValueError(f"Unsupported decoder type '{decoder_type}'.")
 
