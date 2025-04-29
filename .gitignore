@@ -54,3 +54,8 @@ result/
 wandb/
 models--gpt2/
 .locks/
+1_digits_add/
+2_digits_add/
+3_digits_add/
+4_digits_add/
+5_digits_add/

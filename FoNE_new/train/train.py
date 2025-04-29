@@ -1,46 +1,68 @@
 import torch
 import logging
 import sys
-from train.utils import get_regular_embeddings, handle_nan_loss
+from train.utils import get_regular_embeddings, handle_nan_loss, count_trainable_parameters, log_parameter_counts
 
 def train_fne(model, train_loader, number_encoder, intermediate_network, optimizer, scheduler, args, int_digit_len, frac_digit_len, len_gen_size, decoder_type, adapter_type, device, tokenizer=None):
     """
     Training loop for Fourier Neural Embedding (FNE) based models with intermediate network.
     LLM parameters are now trainable along with FNE and intermediate network.
     
+    This function handles two types of decoder strategies:
+    1. 'fne': Uses Fourier-based approach to directly predict numeric values
+    2. 'greedy': Uses token-by-token autoregressive decoding like traditional language models
+    
     Parameters:
-        tokenizer: Required when decoder_type is 'greedy'
+        model: The pretrained language model
+        train_loader: DataLoader for training data
+        number_encoder: The FNE module for numeric embeddings
+        intermediate_network: Network to process embeddings (MLP, Linear, or Identity)
+        optimizer: The optimizer for updating model parameters
+        scheduler: Learning rate scheduler
+        args: Command line arguments and configuration
+        int_digit_len: Length of integer part in numeric representation
+        frac_digit_len: Length of fractional part in numeric representation
+        len_gen_size: Parameter for FNE to add trailing zeros
+        decoder_type: 'fne' or 'greedy' - determines how number predictions are made
+        adapter_type: Type of adapter for modifying model behavior (None, 'linear', 'affine', 'low_rank')
+        device: Computation device (CPU/GPU)
+        tokenizer: Required when decoder_type is 'greedy' to convert numbers to tokens
     """
-    # If using greedy decoder, delegate to train_vanilla
-    if decoder_type == 'greedy':
-        logging.info("Using vanilla training method for greedy decoder")
+    # === Initial Setup for Greedy Decoder ===
+    # If using greedy decoder, we need to adapt the FNE encoder to work with token-based approaches
+    # if decoder_type == 'greedy':
+        # logging.info("Using vanilla training method for greedy decoder")
         
-        # Create a simple adapter function for the compute_loss method
-        orig_compute_loss = number_encoder.fourier_compute_loss
-        orig_compute_prediction = number_encoder.fourier_compute_prediction
+        # # Store references to the original FNE methods that will be patched
+        # orig_compute_loss = number_encoder.fourier_compute_loss
+        # orig_compute_prediction = number_encoder.fourier_compute_prediction
         
-        # Monkey patch the methods temporarily
-        def patched_compute_loss(self, last_hidden_state, label):
-            return orig_compute_loss(last_hidden_state, label, int_digit_len, frac_digit_len)
+        # # Define patched methods that adapt FNE interface to work with token-based approach
+        # def patched_compute_loss(self, last_hidden_state, label):
+        #     # Call original method with correct parameters
+        #     return orig_compute_loss(last_hidden_state, label, int_digit_len, frac_digit_len)
             
-        def patched_compute_prediction(self, last_hidden_state):
-            return orig_compute_prediction(last_hidden_state, int_digit_len, frac_digit_len)
+        # def patched_compute_prediction(self, last_hidden_state):
+        #     # Call original method with correct parameters
+        #     return orig_compute_prediction(last_hidden_state, int_digit_len, frac_digit_len)
         
-        # Save original methods and attributes to restore later
-        number_encoder._original_compute_loss = getattr(number_encoder, 'compute_loss', None)
-        number_encoder._original_compute_prediction = getattr(number_encoder, 'compute_prediction', None)
-        number_encoder._original_frac_digit_len = getattr(number_encoder, 'frac_digit_len', None)
-        number_encoder._original_int_digit_len = getattr(number_encoder, 'int_digit_len', None)
+        # # Save original methods and attributes for later restoration
+        # number_encoder._original_compute_loss = getattr(number_encoder, 'compute_loss', None)
+        # number_encoder._original_compute_prediction = getattr(number_encoder, 'compute_prediction', None)
+        # number_encoder._original_frac_digit_len = getattr(number_encoder, 'frac_digit_len', None)
+        # number_encoder._original_int_digit_len = getattr(number_encoder, 'int_digit_len', None)
         
-        # Add required attributes for vanilla training
-        number_encoder.frac_digit_len = frac_digit_len  # Add this attribute directly
-        number_encoder.int_digit_len = int_digit_len    # Also add int_digit_len for completeness
+        # # Add required attributes to number_encoder for vanilla training
+        # number_encoder.frac_digit_len = frac_digit_len
+        # number_encoder.int_digit_len = int_digit_len
         
-        # Add the patched methods
-        import types
-        number_encoder.compute_loss = types.MethodType(patched_compute_loss, number_encoder)
-        number_encoder.compute_prediction = types.MethodType(patched_compute_prediction, number_encoder)
+        # # Apply the patched methods to the number encoder
+        # import types
+        # number_encoder.compute_loss = types.MethodType(patched_compute_loss, number_encoder)
+        # number_encoder.compute_prediction = types.MethodType(patched_compute_prediction, number_encoder)
         
+        # Note: The commented code below was an attempt to delegate completely to train_regular
+        # but we now handle greedy decoding directly in this function
         # try:
         #     # Run training with patched encoder
         #     # model, dataloader, optimizer, scheduler, device, args# 
@@ -51,331 +73,239 @@ def train_fne(model, train_loader, number_encoder, intermediate_network, optimiz
         #         number_encoder.compute_loss = number_encoder._original_compute_loss
         #     else:
         #         delattr(number_encoder, 'compute_loss')
-                
-        #     if number_encoder._original_compute_prediction is not None:
-        #         number_encoder.compute_prediction = number_encoder._original_compute_prediction
-        #     else:
-        #         delattr(number_encoder, 'compute_prediction')
-                
-        #     # Restore original attributes (or remove them if they didn't exist)
-        #     if number_encoder._original_frac_digit_len is not None:
-        #         number_encoder.frac_digit_len = number_encoder._original_frac_digit_len
-        #     else:
-        #         delattr(number_encoder, 'frac_digit_len')
-                
-        #     if number_encoder._original_int_digit_len is not None:
-        #         number_encoder.int_digit_len = number_encoder._original_int_digit_len
-        #     else:
-        #         delattr(number_encoder, 'int_digit_len')
-                
-        #     # Clean up temporary attributes
-        #     delattr(number_encoder, '_original_compute_loss')
-        #     delattr(number_encoder, '_original_compute_prediction')
-        #     delattr(number_encoder, '_original_frac_digit_len')
-        #     delattr(number_encoder, '_original_int_digit_len')
+        #   ...
     
     # Ensure the tokenizer is provided when using greedy decoder
     if decoder_type == 'greedy' and tokenizer is None:
         raise ValueError("Tokenizer is required when decoder_type is 'greedy'")
         
-    # Ensure everything is on the same device
+    # === Model & Component Preparation ===
+    # Move all components to the appropriate device
     model = model.to(device)
     number_encoder = number_encoder.to(device)
     if intermediate_network is not None:
         intermediate_network = intermediate_network.to(device)
     
-    # Set training mode for each component individually
+    # Set training mode for all components based on configuration
     if not args.freeze_model:
+        # Allow gradient updates for the core LLM if not frozen
         for param in model.parameters():
             param.requires_grad = True
-        # Set training mode without recursion
+        # Set training mode without triggering recursion
         if hasattr(model, 'training'):
             object.__setattr__(model, 'training', True)
     else:
+        # Freeze LLM parameters when specified
         for param in model.parameters():
             param.requires_grad = False
-        # Set eval mode without recursion
+        # Set eval mode without triggering recursion
         if hasattr(model, 'training'):
             object.__setattr__(model, 'training', False)
     
+    # Always train the number encoder and intermediate network
     number_encoder.train()
     if intermediate_network is not None:
         intermediate_network.train()
     
+    # Count and log the trainable parameters
+    param_counts = count_trainable_parameters(model, number_encoder, intermediate_network, adapter_type)
+    logging.info("=== Model Parameter Statistics ===")
+    log_parameter_counts(param_counts, logger=logging)
+    logging.info("================================")
+    
     total_loss = 0
 
+    # === Main Training Loop ===
     for batch_idx, batch in enumerate(train_loader):
         try:
+            # Get batch data and move to device
             input_ids = batch['input_ids'].to(device)
-            scatter_tensor = batch['scatter_tensor'].to(device)
+            scatter_tensor = batch['scatter_tensor'].to(device)  # Tensor indicating [NUM] token positions
             attention_mask = batch['attention_mask'].to(device)
-            labels = batch['labels'].to(device)
-            last_token_mask = batch['last_token_mask'].to(device)
-            len_gen = torch.randint(0, len_gen_size+1, (1,), device=device).item()
+            labels = batch['labels'].to(device)  # Numeric labels as float tensors
+            last_token_mask = batch['last_token_mask'].to(device)  # Mask to identify position of last token
+            len_gen = torch.randint(0, len_gen_size+1, (1,), device=device).item()  # Random number for length generation
             
-            # Get regular embeddings (now with gradients)
+            # Get embeddings from the base model (with gradients enabled)
             regular_embeddings = get_regular_embeddings(model, input_ids)
             
+            # Generate Fourier numeric embeddings and process them
             fourier_embeddings = number_encoder(scatter_tensor, len_gen=len_gen)
-            # Apply intermediate network to the combined embeddings
             if intermediate_network is not None:
                 fourier_embeddings = intermediate_network(fourier_embeddings)
             
+            # Combine regular token embeddings with numeric embeddings
             combined_embeddings = regular_embeddings + fourier_embeddings
             
-            # modified part by EJ: match dtype of inputs same as model dtype
+            # Ensure all inputs match the model's expected data type
             combined_embeddings = combined_embeddings.to(device=device, dtype=model.dtype)
             attention_mask = attention_mask.to(device=device, dtype=model.dtype)
             fourier_embeddings = fourier_embeddings.to(device=device, dtype=model.dtype)
             
             
-            
+            # === FNE Decoder Path (Direct numeric prediction) ===
             if decoder_type == 'fne':
-                # Forward pass through the model (now with gradients)
+                # Forward pass depends on adapter configuration
                 if adapter_type is None:
+                    # Standard forward pass without adapters
                     outputs = model(inputs_embeds=combined_embeddings, attention_mask=attention_mask, output_hidden_states=True)
                 elif adapter_type == 'linear' or adapter_type == 'affine' or adapter_type == 'low_rank':
+                    # Forward pass with adapter modules (needs fourier_embeddings)
                     outputs = model(inputs_embeds=combined_embeddings, attention_mask=attention_mask, output_hidden_states=True, fourier_embeddings=fourier_embeddings)
                 else:
                     raise ValueError(f"Unsupported adapter type '{adapter_type}'.")
-                before_decoder = outputs.hidden_states[-1]
-                last_token_hidden_state = (before_decoder * last_token_mask.unsqueeze(-1)).sum(dim=1)
+                
+                # Extract the hidden state for the last token position
+                before_decoder = outputs.hidden_states[-1]  # Get the final layer hidden states
+                last_token_hidden_state = (before_decoder * last_token_mask.unsqueeze(-1)).sum(dim=1)  # Apply mask to get last token
+                
+                # Compute loss using the FNE-specific loss function
                 loss = number_encoder.fourier_compute_loss(last_token_hidden_state, labels, int_digit_len, frac_digit_len, len_gen=len_gen)
+                
+            # === Greedy Decoder Path (Token-by-token prediction) ===
             elif decoder_type == 'greedy':
-                # Forward pass through the model (now with gradients)
+                # Convert numeric labels to token sequences
+                tokenized_labels = []
+                
+                # Convert numeric labels to target token sequences
+                for label in labels:    # labels is a tensor of shape (batch_size,)
+                    # Convert float to int then to string and tokenize
+                    label_str = str(int(label.item()))
+
+                    # Tokenize the label
+                    tokens = tokenizer(label_str, return_tensors="pt").input_ids.to(device)
+
+                    tokens = tokens[:, 2:]  # Remove BOS and space token
+
+                    # # Verify the tokenization
+                    # dec_label = tokenizer.decode(tokens.squeeze(0))
+                    # print(f"dec_label: {dec_label}")
+                    # print(f"orig_label: {int(label.item())}")
+                    # print(f"{int(float(dec_label)) == int(label.item())}")
+                    
+                    tokenized_labels.append(tokens.squeeze(0))
+                
+                # Create a forward pass
                 if adapter_type is None:
-                    # Convert numeric labels to tokenized labels for greedy decoder
-                    tokenized_labels = []
-                    for label in labels:
-                        # Convert numeric label to string
-                        label_str = str(label.item())
-                        # Add space prefix to ensure consistent tokenization
-                        label_str = " " + label_str  # Add leading space for better tokenization
-                        # Tokenize the string label
-                        tokens = tokenizer(label_str, return_tensors="pt").input_ids.to(device)
-                        # Handle special tokens carefully
-                        if tokens.size(1) > 2:
-                            tokens = tokens[:, 1:-1]  # Remove both BOS and EOS if present
-                        elif tokens.size(1) > 1:
-                            tokens = tokens[:, 1:]    # Remove just BOS if that's all we have
-                        tokenized_labels.append(tokens.squeeze(0))
-                    
-                    # Pad tokenized labels to same length
-                    max_len = max(t.size(0) for t in tokenized_labels)
-                    padded_label_tokens = []
-                    
-                    # Check if any tokenization produced empty sequences
-                    if max_len == 0:
-                        logging.warning("Tokenization resulted in empty sequences. Check tokenizer settings.")
-                        max_len = 1  # Set minimum length to avoid errors
-                    
-                    for tokens in tokenized_labels:
-                        if tokens.size(0) < max_len:
-                            padding = torch.full((max_len - tokens.size(0),), -100,  # Use -100 to ignore in loss
-                                               dtype=tokens.dtype, device=tokens.device)
-                            padded = torch.cat([tokens, padding])
-                        else:
-                            padded = tokens
-                        padded_label_tokens.append(padded)
-                    
-                    # Stack to create batch
-                    token_labels = torch.stack(padded_label_tokens)
-                    
-                    # Debug: Print token labels to check what we're feeding to the model
-                    if args.debug:
-                        for i in range(min(3, len(labels))):  # Print first few examples
-                            original = str(labels[i].item())
-                            tokenized = [t.item() for t in tokenized_labels[i]]
-                            decoded = tokenizer.decode(tokenized_labels[i])
-                            logging.debug(f"Label: {original}, Tokens: {tokenized}, Decoded: {decoded}")
-                    
-                    # Instead of directly using token_labels, prepare properly shifted labels for causal LM
-                    # For causal LM models, we need to shift the labels right (this is typically done internally)
-                    # But here we need to be explicit to ensure proper alignment
-                    
-                    # Create label mask where 1s mark positions to predict (end of sequence)
-                    # We'll use this to create causal LM labels where only target positions have actual values
-                    batch_size = input_ids.size(0)
-                    seq_len = input_ids.size(1)
-                    
-                    # Create special labels tensor that only has the numeric tokens to predict
-                    # First, create a tensor filled with -100 (ignored in loss computation)
-                    shifted_labels = torch.full((batch_size, seq_len), -100, dtype=torch.long, device=device)
-                    
-                    # Place the actual label tokens at the end of the sequence based on the last token position
-                    for i in range(batch_size):
-                        # Find the position of the last non-padding token in the input sequence
-                        last_pos = (input_ids[i] != tokenizer.pad_token_id).nonzero()[-1].item()
-                        
-                        # Calculate where to put label tokens (right after the last token) leaving room for labels
-                        label_start_pos = last_pos - token_labels[i].size(0) + 1
-                        
-                        # Ensure we don't go out of bounds
-                        if label_start_pos < 0:
-                            label_start_pos = 0
-                            logging.warning(f"Sequence too short for label tokens in batch {i}.")
-                        
-                        # Place the tokens at the right position
-                        label_length = token_labels[i].size(0)
-                        shifted_labels[i, label_start_pos:label_start_pos+label_length] = token_labels[i]
-                        
-                        # Debug
-                        if args.debug and i < 3:
-                            logging.debug(f"Input: {tokenizer.decode(input_ids[i])}")
-                            logging.debug(f"Label position: {label_start_pos}, Label: {tokenizer.decode(token_labels[i][token_labels[i] != -100])}")
-                            logging.debug(f"Shifted labels: {shifted_labels[i][shifted_labels[i] != -100]}")
-                    
-                    # Run model with properly aligned labels
                     outputs = model(
-                        inputs_embeds=combined_embeddings, 
+                        inputs_embeds=combined_embeddings,
                         attention_mask=attention_mask,
-                        labels=shifted_labels,  # Use the properly aligned labels
                         output_hidden_states=True
                     )
-                    
-                    # If loss is still too small, it might indicate a problem
-                    if outputs.loss is not None and outputs.loss.item() < 1e-8:
-                        logging.warning(f"Loss is extremely small: {outputs.loss.item()}. Using manual computation.")
-                        
-                        # Get logits for manual loss calculation
-                        logits = outputs.logits
-                        
-                        # Calculate manual loss focusing on positions with labels
-                        loss_fct = torch.nn.CrossEntropyLoss(ignore_index=-100)
-                        
-                        # Reshape for loss calculation (batch_size * sequence_length, vocab_size)
-                        logits_reshaped = logits.view(-1, logits.size(-1))
-                        labels_reshaped = shifted_labels.view(-1)
-                        
-                        # Calculate loss manually
-                        manual_loss = loss_fct(logits_reshaped, labels_reshaped)
-                        
-                        # Use manual loss if it's better than the model's computation
-                        if manual_loss.item() > outputs.loss.item():
-                            outputs.loss = manual_loss
-                            logging.warning(f"Using manual loss: {manual_loss.item()}")
-                
-                elif adapter_type == 'linear' or adapter_type == 'affine' or adapter_type == 'low_rank':
-                    # Same tokenization process for adapter models
-                    tokenized_labels = []
-                    for label in labels:
-                        label_str = str(label.item())
-                        label_str = " " + label_str  # Add leading space for better tokenization
-                        tokens = tokenizer(label_str, return_tensors="pt").input_ids.to(device)
-                        # Handle special tokens carefully
-                        if tokens.size(1) > 2:
-                            tokens = tokens[:, 1:-1]  # Remove both BOS and EOS if present
-                        elif tokens.size(1) > 1:
-                            tokens = tokens[:, 1:]    # Remove just BOS if that's all we have
-                        tokenized_labels.append(tokens.squeeze(0))
-                    
-                    # Pad tokenized labels to same length
-                    max_len = max(t.size(0) for t in tokenized_labels) if tokenized_labels else 1
-                    padded_label_tokens = []
-                    for tokens in tokenized_labels:
-                        if tokens.size(0) < max_len:
-                            padding = torch.full((max_len - tokens.size(0),), -100,
-                                               dtype=tokens.dtype, device=tokens.device)
-                            padded = torch.cat([tokens, padding])
-                        else:
-                            padded = tokens
-                        padded_label_tokens.append(padded)
-                    
-                    token_labels = torch.stack(padded_label_tokens)
-                    
-                    # Debug: Print token labels for adapter types as well
-                    if args.debug:
-                        for i in range(min(5, len(labels))):
-                            original = str(labels[i].item())
-                            tokenized = [t.item() for t in tokenized_labels[i]]
-                            decoded = tokenizer.decode(tokenized_labels[i])
-                            logging.debug(f"Adapter label: {original}, Tokens: {tokenized}, Decoded: {decoded}")
-                    
-                    # Create properly shifted labels for adapter models too
-                    batch_size = input_ids.size(0)
-                    seq_len = input_ids.size(1)
-                    shifted_labels = torch.full((batch_size, seq_len), -100, dtype=torch.long, device=device)
-                    
-                    for i in range(batch_size):
-                        last_pos = (input_ids[i] != tokenizer.pad_token_id).nonzero()[-1].item()
-                        label_start_pos = last_pos - token_labels[i].size(0) + 1
-                        
-                        if label_start_pos < 0:
-                            label_start_pos = 0
-                            logging.warning(f"Sequence too short for label tokens in adapter batch {i}.")
-                        
-                        label_length = token_labels[i].size(0)
-                        shifted_labels[i, label_start_pos:label_start_pos+label_length] = token_labels[i]
-                    
+                elif adapter_type in ['linear', 'affine', 'low_rank']:
                     outputs = model(
-                        inputs_embeds=combined_embeddings, 
+                        inputs_embeds=combined_embeddings,
                         attention_mask=attention_mask,
                         fourier_embeddings=fourier_embeddings,
-                        labels=shifted_labels,
                         output_hidden_states=True
                     )
-                    
-                    # Same manual loss fallback for adapter types
-                    if outputs.loss is not None and outputs.loss.item() < 1e-8:
-                        logging.warning(f"Adapter loss is extremely small: {outputs.loss.item()}")
-                        
-                        logits = outputs.logits
-                        loss_fct = torch.nn.CrossEntropyLoss(ignore_index=-100)
-                        logits_reshaped = logits.view(-1, logits.size(-1))
-                        labels_reshaped = shifted_labels.view(-1)
-                        manual_loss = loss_fct(logits_reshaped, labels_reshaped)
-                        
-                        if manual_loss.item() > outputs.loss.item():
-                            outputs.loss = manual_loss
-                            logging.warning(f"Using manual adapter loss: {manual_loss.item()}")
-                
                 else:
                     raise ValueError(f"Unsupported adapter type '{adapter_type}'.")
-                loss = outputs.loss  # for regular training
                 
-                # Add extra loss check
-                if loss is None or loss.item() == 0:
-                    logging.warning("Loss is zero or None. This suggests a problem with tokenization, "
-                                  "label alignment, or model configuration.")
-                    
-                    # Generate a dummy non-zero loss if all else fails
-                    if loss is None or loss.item() == 0:
-                        # Create a dummy loss from the combined embeddings 
-                        # This is just to prevent zero loss and allow training to continue
-                        dummy_loss = torch.mean(torch.abs(fourier_embeddings)) * 0.001
-                        logging.warning(f"Creating non-zero dummy loss: {dummy_loss.item()}")
-                        loss = dummy_loss
+                # Get the logits from the output
+                logits = outputs.logits
+                
+                # Find the position of the last token in each sequence
+                last_positions = last_token_mask.nonzero()[:, 1]
+                
+                # Calculate loss
+                loss_fct = torch.nn.CrossEntropyLoss(ignore_index=-100)
+                batch_loss = torch.tensor(0.0, device=device)
+                
+                # For each sample in the batch
+                for i, target_tokens in enumerate(tokenized_labels):
+                    # Get predictions starting from the position of interest
+                    sequence_logits = logits[i]  # Shape: [1, vocab_size]
+
+                    ## Debugging
+                    # print(f"target_tokens.shape: {target_tokens.shape}")
+                    # print(f"sequence_logits.shape: {sequence_logits.shape}")
+                    # dec_pred = tokenizer.decode(sequence_logits.argmax(dim=-1))
+                    # print(f"dec_pred: {dec_pred}")
+                    # print(f"sequence_logits.argmax: {sequence_logits.argmax(dim=-1)}")
+                    # print(f"target_tokens: {target_tokens}")
+
+                    if sequence_logits.shape[0] > target_tokens.shape[0]:
+                        # Pad the target tokens by appending EOS token id to match the sequence logits shape
+                        target_tokens = torch.cat([target_tokens, torch.tensor([tokenizer.eos_token_id] * (sequence_logits.shape[0] - target_tokens.shape[0]), device=device)])
+                        # print(f"after padding target_tokens.shape: {target_tokens.shape}")
+                    elif sequence_logits.shape[0] < target_tokens.shape[0]:
+                        # pad_token = tokenizer(" ", return_tensors="pt").input_ids.to(device)
+                        # one-hot vectorize pad_token
+                        pad_tensor = torch.zeros(1, len(tokenizer), device=device)
+                        pad_tensor[0, int(tokenizer.eos_token_id)] = 1
+                        # Pad the sequence logits by appending tensor of length identical to vocab size (dim 1), 
+                        # which is the one-hot vector that corresponds to EOS token to match the target tokens shape
+                        pad_tensor = pad_tensor.expand(target_tokens.shape[0] - sequence_logits.shape[0], -1)
+                        
+                        sequence_logits = torch.cat([sequence_logits, pad_tensor])
+                        # print(f"after padding sequence_logits.shape: {sequence_logits.shape}")
+
+                    # If we have target tokens, calculate loss
+                    if target_tokens.size(0) > 0:
+                        # Standard L2R decoding  
+                        sample_loss = loss_fct(sequence_logits, target_tokens)
+                        batch_loss += sample_loss
+
+                        # # Variant R2L decoding  
+                        # target_tokens = target_tokens.flip(0)
+                        # sample_loss = loss_fct(sequence_logits, target_tokens)
+                        # batch_loss += sample_loss
+                    else:
+                        raise ValueError("No target tokens found")
+                
+                # Average the loss over the batch
+                loss = batch_loss / input_ids.size(0)
+                
+                # Handle zero loss edge case
+                if loss.item() == 0:
+                    # Fallback to a small non-zero loss to prevent training issues
+                    raise ValueError("Zero loss detected")
             else:
                 raise ValueError(f"Unsupported decoder type '{decoder_type}'.")
 
+            # === Backpropagation and Optimization ===
+            # Compute gradients through the entire computation graph
             loss.backward()
             
+            # Apply gradient clipping if enabled
             if args.clip:
-                # Clip gradients for all parameters
                 torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
                 torch.nn.utils.clip_grad_norm_(number_encoder.parameters(), max_norm=1.0)
                 torch.nn.utils.clip_grad_norm_(intermediate_network.parameters(), max_norm=1.0)
 
+            # Update model parameters and learning rate
             optimizer.step()
             scheduler.step()
-            optimizer.zero_grad()
+            optimizer.zero_grad()  # Reset gradients for next iteration
 
+            # Accumulate total loss for reporting
             total_loss += loss.item()
             
         except Exception as e:
+            # Catch and log any exceptions that occur during training
             logging.error(f"Error processing batch {batch_idx}: {str(e)}")
             import traceback
             logging.error(traceback.format_exc())
-            continue
+            continue  # Skip this batch and continue with next
 
-    logging.info(f"avg Loss: {total_loss / len(train_loader)}")
-    return total_loss / len(train_loader)
+    # Report average loss across all batches
+    avg_loss = total_loss / len(train_loader)
+    logging.info(f"avg Loss: {avg_loss}")
+    return avg_loss
 
 def train_regular(model, dataloader, optimizer, scheduler, device, args, number_encoder=None, intermediate_network=None):
     """
     Regular training loop for models without additional embedding modules.
     """
     model.train()
+    
+    # Count trainable parameters
+    param_counts = count_trainable_parameters(model, number_encoder, intermediate_network)
+    logging.info("=== Model Parameter Statistics ===")
+    log_parameter_counts(param_counts, logger=logging)
+    logging.info("================================")
+    
     total_loss = 0
     for batch_idx, batch in enumerate(dataloader):
         input_ids = batch['input_ids'].to(device)
@@ -404,6 +334,13 @@ def train_xval(model, train_loader, xval, optimizer, scheduler, args, device):
     """
     model.train()
     xval.train()
+    
+    # Count trainable parameters (treating xval as the "number_encoder")
+    param_counts = count_trainable_parameters(model, xval)
+    logging.info("=== Model Parameter Statistics ===")
+    log_parameter_counts(param_counts, logger=logging)
+    logging.info("================================")
+    
     total_loss = 0
 
     for batch_idx, batch in enumerate(train_loader):
@@ -441,6 +378,13 @@ def train_vanilla(model, train_loader, vanilla_model, intermediate_network, opti
     model.train()
     vanilla_model.train()
     intermediate_network.train()
+    
+    # Count trainable parameters (treating vanilla_model as the "number_encoder")
+    param_counts = count_trainable_parameters(model, vanilla_model, intermediate_network)
+    logging.info("=== Model Parameter Statistics ===")
+    log_parameter_counts(param_counts, logger=logging)
+    logging.info("================================")
+    
     total_loss = 0
 
     for batch_idx, batch in enumerate(train_loader):

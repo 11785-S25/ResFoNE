@@ -48,3 +48,77 @@ def get_regular_embeddings(model, input_ids):
         return model.model.embed_tokens(input_ids)
     else:
         raise AttributeError(f"Cannot find token embeddings in the model: {type(model)}")
+
+def count_trainable_parameters(model, number_encoder, intermediate_network=None, adapter_type=None):
+    """
+    Count the number of trainable parameters in the entire network.
+    
+    Parameters:
+        model: The pretrained language model
+        number_encoder: The FNE module for numeric embeddings
+        intermediate_network: Network to process embeddings (MLP, Linear, or Identity)
+        adapter_type: Type of adapter ('linear', 'affine', 'low_rank' or None)
+        
+    Returns:
+        A dictionary with parameter counts for each component and the total
+    """
+    counts = {}
+    
+    # Count LLM parameters
+    model_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
+    counts['model'] = model_params
+    
+    # Count number encoder parameters
+    encoder_params = sum(p.numel() for p in number_encoder.parameters() if p.requires_grad)
+    counts['number_encoder'] = encoder_params
+    
+    # Count intermediate network parameters
+    if intermediate_network is not None:
+        intermediate_params = sum(p.numel() for p in intermediate_network.parameters() if p.requires_grad)
+        counts['intermediate_network'] = intermediate_params
+    else:
+        counts['intermediate_network'] = 0
+    
+    # Count adapter parameters if applicable
+    adapter_params = 0
+    if adapter_type is not None and hasattr(model, 'get_adapter_parameters'):
+        # If the model has a method to get adapter parameters
+        adapter_params = sum(p.numel() for p in model.get_adapter_parameters() if p.requires_grad)
+    elif adapter_type is not None:
+        # Try to find adapter parameters by name
+        for name, param in model.named_parameters():
+            if 'adapter' in name.lower() and param.requires_grad:
+                adapter_params += param.numel()
+    counts['adapter'] = adapter_params
+    
+    # Calculate total
+    counts['total'] = sum(count for count in counts.values())
+    
+    return counts
+
+def log_parameter_counts(counts, logger=None):
+    """
+    Log the parameter counts in a readable format
+    
+    Parameters:
+        counts: Dictionary with parameter counts
+        logger: Logger object (if None, print to stdout)
+    """
+    total = counts['total']
+    
+    # Format the output
+    output = ["Trainable parameter counts:"]
+    for component, count in counts.items():
+        if component != 'total':
+            percentage = (count / total * 100) if total > 0 else 0
+            output.append(f"  {component}: {count:,} ({percentage:.2f}%)")
+    
+    output.append(f"Total trainable parameters: {total:,}")
+    
+    # Log or print the output
+    if logger:
+        for line in output:
+            logger.info(line)
+    else:
+        for line in output:
+            print(line)

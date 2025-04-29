@@ -104,7 +104,7 @@ def initialize_optimizer_and_scheduler(model, train_loader, args):
     from transformers import get_scheduler
     optimizer = torch.optim.AdamW(model.parameters(), lr=args.lr)
     total_steps = len(train_loader) * args.epochs
-    warmup_steps = int(0.2 * total_steps)
+    warmup_steps = int(0.1 * total_steps)
     scheduler = get_scheduler(
         name=args.scheduler_name,
         optimizer=optimizer,
